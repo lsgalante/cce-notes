@@ -146,8 +146,9 @@ scale-1 shadow (1280×720) and pointer/caret maths at scale 2.
 
 ## Not done yet
 
-In the editor: frontmatter shows raw (Obsidian draws a Properties
-table), tables and callouts show raw, embeds (`![[…]]`) do not render,
+In the editor: property values are edited as raw YAML (the table flips
+to raw when the caret enters; Obsidian edits in place), tables and
+callouts show raw, embeds (`![[…]]`) do not render,
 and a fenced block has no language label or copy button. Also heading
 completion (`[[Note#`), rendered snippets in the panes (they show
 raw lines), search debounce for large vaults (it scans every note per
