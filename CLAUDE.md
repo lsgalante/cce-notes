@@ -1,10 +1,12 @@
 # cce-notes
 
-The vault's notes editor — milestones 2 and 3 of the Obsidian-on-cce plan,
-built on `cce-vault` (milestone 1). Three panes: files or search on the
-left, one note in the middle — shown as rendered Markdown (**reading
-view**) or edited as text (**source mode**), toggled with Ctrl+E as in
-Obsidian — and backlinks or the outline on the right. Agents reach the
+The vault's notes editor — milestones 2, 3 and 6 of the Obsidian-on-cce
+plan, built on `cce-vault` (milestone 1). Three panes: files or search on
+the left, one note in the middle — shown as rendered Markdown (**reading
+view**) or edited with **live preview** (cce-ui's `DocEditor`: markup
+hidden except on the caret's lines), toggled with Ctrl+E as in Obsidian;
+Ctrl+Shift+E turns the preview off (**source mode**, the same editor) —
+and backlinks or the outline on the right. Agents reach the
 same vault through its MCP tools.
 
 Read `../cce-vault/CLAUDE.md` first: the index, watcher, writes and the
@@ -16,7 +18,7 @@ proposal".
 
 | File | What it owns |
 | --- | --- |
-| `main.rs` | The `Application`: panes, modes, history, switcher + rename prompt, completion, autosave, conflicts, input |
+| `main.rs` | The `Application`: panes, modes, history, switcher + rename prompt, completion, autosave, conflicts, input; hosts the `DocEditor` |
 | `reading.rs` | Lays out `cce_vault::markdown::Block`s at a width into draw items + click targets |
 | `tree.rs` | The file tree's rows (folders first, case-insensitive, collapsible) |
 | `panel.rs` | The scrollable header/title/line list both side panes draw through |
@@ -36,33 +38,39 @@ proposal".
 - **Our own writes come back through the watcher.** They are recognised by
   comparing the disk text with `saved` (the last text read or written), not
   by timing.
-- **Source mode autosaves** 1.5 s after typing stops (`AUTOSAVE_AFTER`,
+- **Editing autosaves** 1.5 s after typing stops (`AUTOSAVE_AFTER`,
   polled through `idle_poll_interval` only while dirty), on leaving a note,
-  on switching to reading, and in `on_exit`.
+  on switching to reading, and in `on_exit`. Dirty is the editor's
+  `buf.revision` against `saved_rev` (no per-tick text compare); a save
+  of text equal to the disk copy writes nothing.
 - **Rename (F2, or a click on the title in the band)** goes through
   `Index::rename`, which rewrites every link to the note across the vault;
   the prompt previews the count from `plan_rename` before Enter. History
   entries follow the rename.
 - **`[[` completion** opens while the caret sits in an unclosed `[[` on
-  its line (`complete::open_link`; a `|` or `#` ends it). Enter/Tab
-  inserts the shortest link text that still resolves (`link_text`) and
-  `]]`, recording one undo step (`TextBox::history.record`); Escape shuts
-  it for that link. It needs the caret's pixel position, which TextBox
-  does not expose: `completion_rect` recomputes it from the public
-  `wrap_text`/`char_width`/`line_height`/`scroll_*` the way TextBox's own
-  `selection_quads` does (monospace, 8 px inner pad) — change both if
-  TextBox's padding changes.
+  its line (`complete::open_link` over the caret's line, char indices;
+  a `|` or `#` ends it). Enter/Tab inserts the shortest link text that
+  still resolves (`link_text`) and `]]` as one undo step
+  (`DocEditor::edit` replacing the line); Escape shuts it for that link.
+  The popup sits at `DocEditor::caret_rect`, which is only current after
+  `prepare` for this frame — `paint_note` prepares, then places it.
 - **Popups over text:** text draws after every plate, so the completion
   popup is a *hole*: the editor is painted four times, clipped to the
   bands around the popup (clips intersect), and the popup fills the gap.
   The quick switcher instead stops painting what it covers.
-- **`load_text` clears the TextBox undo history** and re-syncs
-  `editor_state`; without that, Ctrl+Z after switching notes in source
-  mode stepped back into the previous note's text.
-- **Links:** click in reading, Ctrl+click in source (the caret's byte
-  offset is matched against `cce_vault::parse` link spans). An unresolved
-  link creates the note at the vault root and opens it in source mode, as
-  Obsidian does. Ctrl state comes from `UiContext::ctrl_pressed` (the
+- **`load_text` clears the editor's undo history** (`DocEditor::set_text`
+  does); without that, Ctrl+Z after switching notes stepped back into the
+  previous note's text.
+- **Undo reaches the editor through `Application::undo` / `redo`.** The
+  runner routes the undo chord to the focused widget, then those hooks,
+  and only then `handle_key_input`; the editor is not a registered
+  widget, so the hooks forward to it while it holds the keys
+  (`editor_focused`).
+- **Links:** click in reading and on a rendered link in live preview;
+  Ctrl+click on the caret's (raw) line — the editor answers
+  `Response::Follow`. Unresolved links fade (a resolver passed at paint,
+  `paint_prepared_with`). An unresolved link creates the note at the vault
+  root and opens it in the editor, as Obsidian does. Ctrl state comes from `UiContext::ctrl_pressed` (the
   Wayland modifiers event) — a key event's own `ctrl` flag is stale for the
   Ctrl press itself.
 
@@ -106,7 +114,8 @@ cce-notes search <query>         # the search pane holding it (#tag works)
 
 A second launch forwards its command to the running instance and exits.
 Keys come from input.kdl's `cce-notes` domain: `quick_switcher` (ctrl+o),
-`toggle_mode` (ctrl+e), `save` (ctrl+s), `reload` (ctrl+r), `back`
+`toggle_mode` (ctrl+e), `toggle_source` (ctrl+shift+e: live preview ↔
+source), `save` (ctrl+s), `reload` (ctrl+r), `back`
 (alt+arrowleft), `forward` (alt+arrowright), `toggle_tree` (ctrl+\\),
 `toggle_side` (ctrl+]), `search` (ctrl+shift+f), `rename` (f2), `graph`
 (ctrl+g: `cce-graph --vault <this vault> --local`, single-instance), `daily`
@@ -137,8 +146,10 @@ scale-1 shadow (1280×720) and pointer/caret maths at scale 2.
 
 ## Not done yet
 
-Heading completion (`[[Note#`), rendered snippets in the panes (they show
+In the editor: frontmatter shows raw (Obsidian draws a Properties
+table), tables and callouts show raw, embeds (`![[…]]`) do not render,
+and a fenced block has no language label or copy button. Also heading
+completion (`[[Note#`), rendered snippets in the panes (they show
 raw lines), search debounce for large vaults (it scans every note per
 keystroke), embedded images, the icon (`Icon=cce-notes` has no SVG in
-cce-icons yet), per-note scroll in the history, and the move of the
-reading view into cce-ui.
+cce-icons yet), and per-note scroll in the history.

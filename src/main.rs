@@ -1,17 +1,19 @@
 //! `cce-notes` — the vault's notes editor (Obsidian-on-cce, milestone 2).
 //!
 //! A file tree on the left and one note on the right, read as rendered
-//! Markdown (the reading view) or edited as text (source mode), toggled
-//! with Ctrl+E as in Obsidian. Links follow on click — or Ctrl+click in
-//! source — and a link to a note that does not exist creates it. Ctrl+O is
-//! the quick switcher; Alt+←/→ walk the history.
+//! Markdown (the reading view) or edited in live preview (markup shown
+//! only on the caret's lines, cce-ui's `DocEditor`), toggled with Ctrl+E as
+//! in Obsidian; Ctrl+Shift+E turns the preview off (source mode). Links
+//! follow on click — or Ctrl+click on the caret's line — and a link to a
+//! note that does not exist creates it. Ctrl+O is the quick switcher;
+//! Alt+←/→ walk the history.
 //!
 //! The files are the source of truth and there is no daemon: the app
 //! embeds a `cce_vault::Index` and a watcher, so an edit from Obsidian,
 //! Dropbox or another cce app arrives like any other change. A clean
 //! buffer reloads silently; a dirty one is flagged as a conflict and never
-//! overwritten. Source mode saves a moment after typing stops, on leaving
-//! the note, and on exit.
+//! overwritten. Editing saves a moment after typing stops, on leaving the
+//! note, and on exit.
 //!
 //! The vault comes from `--vault <dir>`, `$CCE_VAULT`, or
 //! `vault { path "…" }` in `~/.config/cce/config.kdl`. The app runs single
@@ -36,6 +38,7 @@ use cce_ui::widget::{
     Adapted, Bounds, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta, NamedKey, ScrollMotion,
     TextBox, WidgetHost,
 };
+use cce_ui::widget::doc_editor::{self, DocEditor, EditorTheme, Pos};
 use cce_vault::markdown::{Block, SpanLink};
 use cce_vault::{FileKind, Index, VaultWatcher};
 use wayland_client::QueueHandle;
@@ -62,7 +65,7 @@ const TAB_H: f32 = 30.0;
 const SEARCH_H: f32 = 30.0;
 const COMPLETE_W: f32 = 320.0;
 const COMPLETE_ROW_H: f32 = 24.0;
-/// Source mode saves once typing has paused this long.
+/// Editing saves once typing has paused this long.
 const AUTOSAVE_AFTER: Duration = Duration::from_millis(1500);
 
 const FG: [f32; 4] = cce_ui::colors::TEXT_FG;
@@ -92,6 +95,7 @@ static STARTUP: OnceLock<Startup> = OnceLock::new();
 struct Keys {
     switcher: String,
     toggle_mode: String,
+    toggle_source: String,
     save: String,
     reload: String,
     back: String,
@@ -111,6 +115,7 @@ impl Keys {
         Keys {
             switcher: get("quick_switcher", "ctrl+o"),
             toggle_mode: get("toggle_mode", "ctrl+e"),
+            toggle_source: get("toggle_source", "ctrl+shift+e"),
             save: get("save", "ctrl+s"),
             reload: get("reload", "ctrl+r"),
             back: get("back", "alt+arrowleft"),
@@ -129,6 +134,7 @@ impl Keys {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Reading,
+    /// The editor: live preview, or source with the preview off.
     Source,
 }
 
@@ -146,9 +152,10 @@ enum SideTab {
     Outline,
 }
 
-/// `[[` completion in source mode: the link being typed and its choices.
+/// `[[` completion while editing: the link being typed and its choices.
 struct Completion {
-    /// Char index just past the `[[`.
+    /// The caret's line, and the char index in it just past the `[[`.
+    line: usize,
     start: usize,
     query: String,
     /// Vault paths, best first.
@@ -204,9 +211,11 @@ struct NotesApp {
     pending_line: Option<usize>,
     hover_hit: bool,
 
-    editor: Adapted<TextBox>,
-    /// The buffer as last seen by the autosave check, and when it changed.
-    edit_seen: String,
+    editor: DocEditor,
+    /// The editor's revision when its text last matched the disk.
+    saved_rev: u64,
+    /// The revision as last seen by the autosave check, and when it changed.
+    edit_seen: u64,
     edit_changed_at: Instant,
 
     history: Vec<String>,
@@ -229,9 +238,9 @@ struct NotesApp {
     side_dirty: bool,
 
     completion: Option<Completion>,
-    /// A `[[` whose completion was dismissed with Escape: it stays shut
-    /// until the caret leaves that link.
-    completion_dismissed: Option<usize>,
+    /// A `[[` (line, start) whose completion was dismissed with Escape: it
+    /// stays shut until the caret leaves that link.
+    completion_dismissed: Option<(usize, usize)>,
 
     conflict: bool,
     status: Option<(String, bool)>,
@@ -301,14 +310,14 @@ impl NotesApp {
         (x, m.note.y + READ_PAD, width)
     }
 
+    /// The editor fills the note pane; it centres its own column.
     fn editor_rect(&self, m: &Metrics) -> Rect {
-        let gap = cce_ui::layout::root_plate_gap();
-        Rect {
-            x: m.note.x + gap,
-            y: m.note.y + gap,
-            width: (m.note.width - 2.0 * gap).max(50.0),
-            height: (m.note.height - 2.0 * gap).max(50.0),
-        }
+        m.note
+    }
+
+    /// The editor takes keys: editing, with nothing else holding them.
+    fn editor_focused(&self) -> bool {
+        self.mode == Mode::Source && self.switcher.is_none() && !self.search_input.editing
     }
 
     fn rebuild_rows(&mut self) {
@@ -318,16 +327,12 @@ impl NotesApp {
         self.tree_hover = None;
     }
 
-    fn editor_text(&self) -> &str {
-        if self.editor.editing {
-            &self.editor.edit_buffer
-        } else {
-            &self.editor.text
-        }
+    fn editor_text(&self) -> String {
+        self.editor.text()
     }
 
     fn dirty(&self) -> bool {
-        self.mode == Mode::Source && self.current.is_some() && self.editor_text() != self.saved
+        self.mode == Mode::Source && self.current.is_some() && self.editor.buf.revision != self.saved_rev
     }
 
     fn set_status(&mut self, msg: impl Into<String>, error: bool) {
@@ -344,17 +349,12 @@ impl NotesApp {
     /// Show `text` as the current note's content, as on disk.
     fn load_text(&mut self, text: String) {
         self.blocks = cce_vault::markdown::blocks(&text);
-        self.editor.text = text.clone();
-        self.editor.edit_buffer = text.clone();
-        self.editor.cursor_idx = 0;
-        self.editor.select_anchor = None;
-        self.editor.all_selected = false;
-        self.editor.sync_editor_state();
-        // Undo must not step back into another note's (or the pre-reload)
-        // text.
-        self.editor.history.clear();
+        // Clears the undo history too: undo must not step back into another
+        // note's (or the pre-reload) text.
+        self.editor.set_text(&text);
+        self.saved_rev = self.editor.buf.revision;
         self.completion = None;
-        self.edit_seen = text.clone();
+        self.edit_seen = self.saved_rev;
         self.saved = text;
         self.conflict = false;
         self.side_dirty = true;
@@ -371,11 +371,18 @@ impl NotesApp {
         if !self.dirty() && !(force && self.mode == Mode::Source) {
             return true;
         }
-        let text = self.editor_text().to_string();
+        let text = self.editor_text();
+        let rev = self.editor.buf.revision;
+        if text == self.saved && !force {
+            // Edited back to what is on disk: nothing to write.
+            self.saved_rev = rev;
+            return true;
+        }
         let (Some(cur), Some(ix)) = (self.current.clone(), self.index.as_mut()) else { return false };
         match ix.write_text(&cur, &text) {
             Ok(()) => {
                 self.saved = text;
+                self.saved_rev = rev;
                 self.conflict = false;
                 true
             }
@@ -534,13 +541,12 @@ impl NotesApp {
             if !self.save() {
                 return;
             }
-            let text = self.editor_text().to_string();
+            let text = self.editor_text();
             self.blocks = cce_vault::markdown::blocks(&text);
-            self.editor.unfocus();
+            self.completion = None;
             self.invalidate();
         } else {
-            self.ui_context.set_focused(&mut self.editor);
-            WidgetHost::focus(&mut self.editor);
+            self.search_input.unfocus();
         }
         self.mode = mode;
         self.needs_rebuild = true;
@@ -636,10 +642,6 @@ impl NotesApp {
     fn close_switcher(&mut self) {
         self.switcher = None;
         self.switcher_input.unfocus();
-        if self.mode == Mode::Source {
-            self.ui_context.set_focused(&mut self.editor);
-            WidgetHost::focus(&mut self.editor);
-        }
         self.needs_rebuild = true;
     }
 
@@ -890,21 +892,13 @@ impl NotesApp {
     }
 
     /// Bring a 0-based source line of the open note into view: scroll the
-    /// reading view to its block, or put the source caret at its start.
+    /// reading view to its block, or put the editor's caret at its start.
     fn goto_line(&mut self, line: usize) {
         match self.mode {
             Mode::Reading => self.pending_line = Some(line),
             Mode::Source => {
-                let text = self.editor_text().to_string();
-                let idx: usize = text.split('\n').take(line).map(|l| l.chars().count() + 1).sum();
-                self.ui_context.set_focused(&mut self.editor);
-                WidgetHost::focus(&mut self.editor);
-                self.editor.edit_buffer = text;
-                self.editor.cursor_idx = idx.min(self.editor.edit_buffer.chars().count());
-                self.editor.select_anchor = None;
-                self.editor.all_selected = false;
-                self.editor.sync_editor_state();
-                self.editor.scroll_to_cursor();
+                self.search_input.unfocus();
+                self.editor.reveal_line(line);
             }
         }
         self.needs_rebuild = true;
@@ -912,27 +906,35 @@ impl NotesApp {
 
     // ---- [[ completion -----------------------------------------------------
 
+    /// The caret's line and its char index in it.
+    fn caret_chars(&self) -> (usize, usize) {
+        let p = self.editor.buf.caret;
+        let line = self.editor.buf.line(p.line);
+        (p.line, line[..p.col.min(line.len())].chars().count())
+    }
+
     /// Open, update or close the completion for the caret's position.
     fn update_completion(&mut self) {
-        if self.mode != Mode::Source || !self.editor.editing {
+        if !self.editor_focused() || self.editor.buf.selection().is_some() {
             self.completion = None;
             return;
         }
-        let found = complete::open_link(&self.editor.edit_buffer, self.editor.cursor_idx);
+        let (line, col) = self.caret_chars();
+        let found = complete::open_link(self.editor.buf.line(line), col);
         let Some((start, query)) = found else {
             self.completion = None;
             self.completion_dismissed = None;
             return;
         };
-        if self.completion_dismissed == Some(start) {
+        if self.completion_dismissed == Some((line, start)) {
             return;
         }
-        if self.completion.as_ref().is_some_and(|c| c.start == start && c.query == query) {
+        if self.completion.as_ref().is_some_and(|c| c.line == line && c.start == start && c.query == query) {
             return;
         }
         let Some(ix) = &self.index else { return };
         let choices = complete::choices(ix, &query);
-        self.completion = Some(Completion { start, query, choices, selected: 0 });
+        self.completion = Some(Completion { line, start, query, choices, selected: 0 });
         self.needs_rebuild = true;
     }
 
@@ -948,7 +950,7 @@ impl NotesApp {
             Key::Named(NamedKey::ArrowUp) => c.selected = (c.selected + n - 1) % n,
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => self.accept_completion(),
             Key::Named(NamedKey::Escape) => {
-                self.completion_dismissed = Some(c.start);
+                self.completion_dismissed = Some((c.line, c.start));
                 self.completion = None;
             }
             _ => return false,
@@ -957,48 +959,37 @@ impl NotesApp {
         true
     }
 
+    /// Write the chosen link into the caret's line: one undo step.
     fn accept_completion(&mut self) {
         let Some(c) = self.completion.take() else { return };
         let (Some(ix), Some(path)) = (&self.index, c.choices.get(c.selected)) else { return };
         let link = complete::link_text(ix, self.current.as_deref(), path);
-        let e = &mut self.editor;
-        let before = cce_ui::widget::editor::TextEditorState {
-            buffer: e.edit_buffer.clone(),
-            cursor_idx: e.cursor_idx,
-            select_anchor: e.select_anchor,
-            all_selected: e.all_selected,
-        };
-        let (text, caret) = complete::apply(&e.edit_buffer, c.start, e.cursor_idx, &link);
-        e.history.record(before);
-        e.edit_buffer = text;
-        e.cursor_idx = caret;
-        e.select_anchor = None;
-        e.all_selected = false;
-        e.sync_editor_state();
-        e.scroll_to_cursor();
+        let (line, col) = self.caret_chars();
+        if line != c.line {
+            return;
+        }
+        let text = self.editor.buf.line(line).to_string();
+        let (next, caret) = complete::apply(&text, c.start, col, &link);
+        let caret_byte = next.char_indices().nth(caret).map_or(next.len(), |(b, _)| b);
+        self.editor.edit(Pos::new(line, 0), Pos::new(line, text.len()), &next, Pos::new(line, caret_byte));
     }
 
-    /// The completion popup's rect, under the caret and inside the note pane.
-    fn completion_rect(&self, m: &Metrics) -> Option<Rect> {
-        let c = self.completion.as_ref().filter(|c| !c.choices.is_empty())?;
-        let e = &self.editor;
+    /// The completion popup's rect, under the caret and inside the note
+    /// pane. Valid after the editor is prepared for this frame.
+    fn completion_rect(&mut self, m: &Metrics) -> Option<Rect> {
+        let n = self.completion.as_ref().filter(|c| !c.choices.is_empty())?.choices.len();
         let r = self.editor_rect(m);
-        let (cw, lh) = (e.char_width(), e.line_height());
-        let max_chars = (((r.width - 16.0) / cw).floor() as usize).max(1);
-        let (_, map) = e.wrap_text(max_chars);
-        let (line, col) = *map.get(e.cursor_idx.min(map.len().saturating_sub(1)))?;
-        let caret_x = r.x + 8.0 + col as f32 * cw - e.scroll_x;
-        let caret_y = r.y + 8.0 + line as f32 * lh - e.scroll_y;
-        let h = c.choices.len() as f32 * COMPLETE_ROW_H + 8.0;
+        let caret = self.editor.caret_rect();
+        let h = n as f32 * COMPLETE_ROW_H + 8.0;
         let w = COMPLETE_W.min(r.width);
-        let x = caret_x.min(r.x + r.width - w).max(r.x);
+        let x = caret.x.min(r.x + r.width - w).max(r.x);
         // Below the caret line, or above it when there is no room below.
-        let below = caret_y + lh + 2.0;
-        let y = if below + h <= r.y + r.height { below } else { (caret_y - h - 2.0).max(r.y) };
+        let below = caret.y + caret.height + 2.0;
+        let y = if below + h <= r.y + r.height { below } else { (caret.y - h - 2.0).max(r.y) };
         Some(Rect { x, y, width: w, height: h })
     }
 
-    fn completion_row_at(&self, m: &Metrics, x: f32, y: f32) -> Option<usize> {
+    fn completion_row_at(&mut self, m: &Metrics, x: f32, y: f32) -> Option<usize> {
         let r = self.completion_rect(m)?;
         if !contains(r, x, y) {
             return None;
@@ -1054,20 +1045,6 @@ impl NotesApp {
         l.hit(x - ox, y - oy + self.read_scroll).cloned()
     }
 
-    /// In source mode, the link under the editor's caret (after a click).
-    fn link_at_caret(&self) -> Option<SpanLink> {
-        let text = self.editor_text();
-        let byte = text.char_indices().nth(self.editor.cursor_idx).map_or(text.len(), |(b, _)| b);
-        let note = cce_vault::parse::parse(text);
-        let link = note.links.iter().find(|l| l.span.start <= byte && byte < l.span.end)?;
-        let url = link.target.contains("://") || link.target.starts_with("mailto:");
-        Some(if url {
-            SpanLink::Url(link.target.clone())
-        } else {
-            SpanLink::Note { target: link.target.clone(), subpath: link.subpath.clone() }
-        })
-    }
-
     // ---- painting --------------------------------------------------------
 
     fn paint_band(&self, pc: &mut PaintCtx, m: &Metrics) {
@@ -1103,6 +1080,7 @@ impl NotesApp {
         if self.current.is_some() {
             let label = match self.mode {
                 Mode::Reading => "Reading",
+                Mode::Source if self.editor.preview => "Editing",
                 Mode::Source => "Source",
             };
             let c = m.mode_chip;
@@ -1137,8 +1115,11 @@ impl NotesApp {
         } else if let Some((msg, err)) = &self.status {
             (msg.clone(), if *err { CONFLICT } else { DIM })
         } else if let (Some(cur), Some(ix)) = (&self.current, &self.index) {
-            let text = if self.mode == Mode::Source { self.editor_text() } else { self.saved.as_str() };
-            let words = text.split_whitespace().count();
+            let words = if self.mode == Mode::Source {
+                self.editor.buf.lines().iter().map(|l| l.split_whitespace().count()).sum()
+            } else {
+                self.saved.split_whitespace().count()
+            };
             // Notes linking here, as the backlinks pane counts them.
             let back = ix.backlinks(cur).iter().filter(|b| b.source != cur).map(|b| b.source).collect::<std::collections::HashSet<_>>().len();
             (format!("{} · {}", plural(words, "word"), plural(back, "backlink")), DIM)
@@ -1251,26 +1232,40 @@ impl NotesApp {
             return;
         }
         match self.mode {
-            Mode::Source => match self.completion_rect(m) {
-                // Text draws over every plate, so the popup cannot simply
-                // cover the editor: paint the editor four times, clipped to
-                // the bands around the popup, and the popup into the hole.
-                Some(hole) => {
-                    let e = self.editor_rect(m);
-                    let (l, t, r, b) = (e.x - 4.0, e.y - 4.0, e.x + e.width + 4.0, e.y + e.height + 4.0);
-                    let bands = [
-                        Rect { x: l, y: t, width: r - l, height: hole.y - t },
-                        Rect { x: l, y: hole.y + hole.height, width: r - l, height: b - hole.y - hole.height },
-                        Rect { x: l, y: hole.y, width: hole.x - l, height: hole.height },
-                        Rect { x: hole.x + hole.width, y: hole.y, width: r - hole.x - hole.width, height: hole.height },
-                    ];
-                    for band in bands.into_iter().filter(|b| b.width > 0.0 && b.height > 0.0) {
-                        pc.clip(band, |pc| cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.editor, pc));
+            Mode::Source => {
+                let e = self.editor_rect(m);
+                let focused = self.editor_focused();
+                self.editor.prepare(e);
+                let hole = self.completion_rect(m);
+                let (index, cur) = (&self.index, self.current.as_deref());
+                let resolved = |t: &doc_editor::Target| match t {
+                    doc_editor::Target::Note { target, .. } => {
+                        target.is_empty() || index.as_ref().is_some_and(|ix| ix.resolve_text(cur, target).is_some())
                     }
-                    self.paint_completion(pc, hole);
+                    doc_editor::Target::Url(_) => true,
+                };
+                match hole {
+                    // Text draws over every plate, so the popup cannot simply
+                    // cover the editor: paint the editor four times, clipped
+                    // to the bands around the popup, and the popup into the
+                    // hole.
+                    Some(hole) => {
+                        let (l, t, r, b) = (e.x, e.y, e.x + e.width, e.y + e.height);
+                        let bands = [
+                            Rect { x: l, y: t, width: r - l, height: hole.y - t },
+                            Rect { x: l, y: hole.y + hole.height, width: r - l, height: b - hole.y - hole.height },
+                            Rect { x: l, y: hole.y, width: hole.x - l, height: hole.height },
+                            Rect { x: hole.x + hole.width, y: hole.y, width: r - hole.x - hole.width, height: hole.height },
+                        ];
+                        let ed = &mut self.editor;
+                        for band in bands.into_iter().filter(|b| b.width > 0.0 && b.height > 0.0) {
+                            pc.clip(band, |pc| ed.paint_prepared_with(pc, focused, &resolved));
+                        }
+                        self.paint_completion(pc, hole);
+                    }
+                    None => self.editor.paint_prepared_with(pc, focused, &resolved),
                 }
-                None => cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.editor, pc),
-            },
+            }
             Mode::Reading => {
                 let (ox, oy, width) = self.reading_frame(m);
                 self.ensure_layout(width);
@@ -1461,9 +1456,9 @@ impl Application for NotesApp {
         }
         let _ = sender.send(Message::Command(startup.command.clone()));
 
-        let mut editor = TextBox::new(String::new()).with_multiline(true).with_draw_bg_border(true).with_max_width(None);
-        editor.font_family = "monospace".to_string();
-        editor.font_size = 13.0;
+        let mut editor = DocEditor::new("", EditorTheme::new(READ_SIZE), true);
+        editor.max_width = READ_MAX_W;
+        editor.pad = READ_PAD;
         let switcher_input = TextBox::new(String::new()).with_placeholder("Find or create a note…");
         let search_input = TextBox::new(String::new()).with_placeholder("Search");
 
@@ -1489,8 +1484,9 @@ impl Application for NotesApp {
             read_motion: ScrollMotion::new(),
             pending_line: None,
             hover_hit: false,
+            saved_rev: editor.buf.revision,
+            edit_seen: editor.buf.revision,
             editor,
-            edit_seen: String::new(),
             edit_changed_at: Instant::now(),
             history: Vec::new(),
             hist_pos: 0,
@@ -1543,7 +1539,7 @@ impl Application for NotesApp {
     }
 
     fn idle_poll_interval(&self) -> Option<Duration> {
-        // Wakes the autosave check while source mode holds unsaved text.
+        // Wakes the autosave check while the editor holds unsaved text.
         self.dirty().then_some(Duration::from_millis(500))
     }
 
@@ -1567,10 +1563,13 @@ impl Application for NotesApp {
         if self.search_panel.tick(dt, m.tree_body) | self.side_panel.tick(dt, m.side_body) {
             *needs_rebuild = true;
         }
+        if self.mode == Mode::Source && self.editor.tick(dt) {
+            *needs_rebuild = true;
+        }
         if self.dirty() && !self.conflict {
             let now = Instant::now();
-            if self.editor_text() != self.edit_seen {
-                self.edit_seen = self.editor_text().to_string();
+            if self.editor.buf.revision != self.edit_seen {
+                self.edit_seen = self.editor.buf.revision;
                 self.edit_changed_at = now;
             } else if now.duration_since(self.edit_changed_at) >= AUTOSAVE_AFTER {
                 self.save();
@@ -1582,8 +1581,6 @@ impl Application for NotesApp {
     fn display_list(&mut self, size: LogicalSize, scale: f64) -> Option<DisplayList> {
         if !self.widgets_registered {
             self.widgets_registered = true;
-            let (id, ptr) = (self.editor.id(), self.editor.as_ptr_mut());
-            self.ui_context.register_widget(id, ptr);
             let (id, ptr) = (self.switcher_input.id(), self.switcher_input.as_ptr_mut());
             self.ui_context.register_widget(id, ptr);
             let (id, ptr) = (self.search_input.id(), self.search_input.as_ptr_mut());
@@ -1594,6 +1591,7 @@ impl Application for NotesApp {
         if size_changed {
             if self.scale != scale {
                 self.layout = None;
+                self.editor.invalidate();
             }
             self.width = size.width as u32;
             self.height = size.height as u32;
@@ -1602,8 +1600,6 @@ impl Application for NotesApp {
         }
         let m = self.metrics();
         if self.needs_rebuild || size_changed {
-            let e = self.editor_rect(&m);
-            self.editor.set_rect(e.x, e.y, e.width, e.height);
             let r = self.switcher_rect();
             self.switcher_input.set_rect(r.x + 12.0, r.y + 12.0, r.width - 24.0, 32.0);
             let sb = m.search_box;
@@ -1639,6 +1635,28 @@ impl Application for NotesApp {
     }
 
     fn display_list_text(&self) -> bool {
+        true
+    }
+
+    /// Ctrl+Z reaches the editor through here: the runner routes the undo
+    /// chord to the focused widget first, and the editor is not one.
+    fn undo(&mut self, needs_rebuild: &mut bool) -> bool {
+        if !self.editor_focused() {
+            return false;
+        }
+        self.editor.undo();
+        self.update_completion();
+        *needs_rebuild = true;
+        true
+    }
+
+    fn redo(&mut self, needs_rebuild: &mut bool) -> bool {
+        if !self.editor_focused() {
+            return false;
+        }
+        self.editor.redo();
+        self.update_completion();
+        *needs_rebuild = true;
         true
     }
 
@@ -1707,12 +1725,19 @@ impl Application for NotesApp {
         if self.left_tab == LeftTab::Search && self.ui_context.propagate_event(&ev, self.search_input.id()) {
             *needs_rebuild = true;
         }
-        let hit = self.reading_hit(x, y).is_some();
+        let mut hit = self.reading_hit(x, y).is_some();
+        if self.mode == Mode::Source {
+            if self.editor.dragging() {
+                if self.editor.drag(x, y) != doc_editor::Response::None {
+                    self.update_completion();
+                    *needs_rebuild = true;
+                }
+            } else if contains(m.note, x, y) {
+                hit = self.editor.link_at(x, y);
+            }
+        }
         if hit != self.hover_hit {
             self.hover_hit = hit;
-            *needs_rebuild = true;
-        }
-        if self.mode == Mode::Source && self.ui_context.propagate_event(&ev, self.editor.id()) {
             *needs_rebuild = true;
         }
     }
@@ -1755,7 +1780,6 @@ impl Application for NotesApp {
         }
         if in_search {
             if pressed && !self.search_input.editing {
-                self.editor.unfocus();
                 self.ui_context.set_focused(&mut self.search_input);
                 WidgetHost::focus(&mut self.search_input);
             }
@@ -1833,16 +1857,24 @@ impl Application for NotesApp {
                 _ => {}
             }
         }
-        if self.mode == Mode::Source {
-            let ctrl_click = pressed && self.ui_context.ctrl_pressed;
-            self.ui_context.propagate_event(&ev, self.editor.id());
-            if ctrl_click && contains(self.editor_rect(&m), x, y) {
-                if let Some(link) = self.link_at_caret() {
-                    self.follow(link);
-                    return None;
+        if self.mode == Mode::Source && button == MouseButton::Left {
+            if state == ElementState::Released {
+                self.editor.release();
+            } else if contains(self.editor_rect(&m), x, y) {
+                let (shift, ctrl) = (self.ui_context.shift_pressed, self.ui_context.ctrl_pressed);
+                match self.editor.press(x, y, shift, ctrl) {
+                    doc_editor::Response::Follow(target) => {
+                        self.editor.release();
+                        self.hover_hit = false;
+                        self.follow(match target {
+                            doc_editor::Target::Note { target, subpath } => SpanLink::Note { target, subpath },
+                            doc_editor::Target::Url(url) => SpanLink::Url(url),
+                        });
+                        return None;
+                    }
+                    _ => self.update_completion(),
                 }
             }
-            self.update_completion();
         }
         None
     }
@@ -1888,8 +1920,7 @@ impl Application for NotesApp {
                 }
             }
             Mode::Source => {
-                let ev = Event::MouseWheel { delta: *delta, x, y, local_x: x, local_y: y };
-                if self.ui_context.propagate_event(&ev, self.editor.id()) {
+                if self.editor.wheel(delta) {
                     *needs_rebuild = true;
                 }
             }
@@ -1942,6 +1973,14 @@ impl Application for NotesApp {
             if k(&self.keys.toggle_mode) {
                 let next = if self.mode == Mode::Reading { Mode::Source } else { Mode::Reading };
                 self.set_mode(next);
+                return None;
+            }
+            if k(&self.keys.toggle_source) && self.current.is_some() {
+                // Live preview <-> source, both editing; from reading it
+                // opens the editor in the mode it flips to.
+                let on = !self.editor.preview;
+                self.editor.set_preview(on);
+                self.set_mode(Mode::Source);
                 return None;
             }
             if k(&self.keys.save) {
@@ -2037,10 +2076,13 @@ impl Application for NotesApp {
 
         match self.mode {
             Mode::Source => {
-                if pressed && self.completion_key(&event.logical_key) {
+                if !pressed {
                     return None;
                 }
-                self.ui_context.propagate_event(&ev, self.editor.id());
+                if self.completion_key(&event.logical_key) {
+                    return None;
+                }
+                self.editor.key(event);
                 self.update_completion();
             }
             Mode::Reading if pressed => {
