@@ -108,8 +108,13 @@ A second launch forwards its command to the running instance and exits.
 Keys come from input.kdl's `cce-notes` domain: `quick_switcher` (ctrl+o),
 `toggle_mode` (ctrl+e), `save` (ctrl+s), `reload` (ctrl+r), `back`
 (alt+arrowleft), `forward` (alt+arrowright), `toggle_tree` (ctrl+\\),
-`toggle_side` (ctrl+]), `search` (ctrl+shift+f), `rename` (f2), `daily`
+`toggle_side` (ctrl+]), `search` (ctrl+shift+f), `rename` (f2), `graph`
+(ctrl+g: `cce-graph --vault <this vault> --local`, single-instance), `daily`
 (alt+d), `quit` (ctrl+q). Mouse back/forward walk the history too.
+
+The instance socket also answers `current` (`ok <vault path>`) straight
+from its listener thread, from a value `open_path`/`rename` keep up to
+date (`instance::set_current`) — cce-graph's local graph polls it.
 
 ## MCP
 

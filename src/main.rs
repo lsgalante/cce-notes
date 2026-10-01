@@ -101,6 +101,7 @@ struct Keys {
     toggle_side: String,
     search: String,
     rename: String,
+    graph: String,
     daily: String,
     quit: String,
 }
@@ -119,6 +120,7 @@ impl Keys {
             toggle_side: get("toggle_side", "ctrl+]"),
             search: get("search", "ctrl+shift+f"),
             rename: get("rename", "f2"),
+            graph: get("graph", "ctrl+g"),
             daily: get("daily", "alt+d"),
             quit: get("quit", "ctrl+q"),
         }
@@ -438,6 +440,7 @@ impl NotesApp {
         };
         let same = self.current.as_deref() == Some(path);
         self.current = Some(path.to_string());
+        instance::set_current(Some(path));
         self.load_text(text);
         if !same {
             self.read_scroll = 0.0;
@@ -829,6 +832,7 @@ impl NotesApp {
                     // Its own self-links may have been rewritten too.
                     let to = plan.to.clone();
                     self.current = Some(to.clone());
+                    instance::set_current(Some(&to));
                     if let Ok(text) = self.index.as_ref().map(|ix| ix.read_text(&to)).transpose().map(Option::unwrap_or_default) {
                         let scroll = self.read_scroll;
                         self.load_text(text);
@@ -2010,6 +2014,23 @@ impl Application for NotesApp {
             }
             if k(&self.keys.rename) && self.current.is_some() {
                 self.open_rename();
+                return None;
+            }
+            if k(&self.keys.graph) && self.index.is_some() {
+                // The local graph follows this window's note (it polls
+                // `current` on the instance socket). cce-graph's vault mode
+                // is single-instance, so a second press only raises nothing
+                // new.
+                let vault = self.index.as_ref().map(|ix| ix.root().to_path_buf());
+                let mut cmd = std::process::Command::new("cce-graph");
+                cmd.arg("--vault");
+                if let Some(v) = vault {
+                    cmd.arg(v);
+                }
+                cmd.arg("--local");
+                if let Err(e) = cmd.spawn() {
+                    self.set_status(format!("Could not start cce-graph: {e}"), true);
+                }
                 return None;
             }
         }

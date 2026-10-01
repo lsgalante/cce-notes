@@ -11,6 +11,9 @@
 //! - `daily [YYYY-MM-DD]` — open (creating it from the template) a day's note.
 //! - `search <query>` — show the search pane holding `query` (`#tag` too).
 //! - `show` — nothing but bringing the instance up.
+//! - `current` — answered `ok <vault path>` (or a bare `ok` with no note
+//!   open) straight from the listener thread; cce-graph's local graph
+//!   polls it to follow the note on screen.
 //!
 //! Connect before binding, as cce-browser does: a refused connect means a
 //! crashed instance left its socket file, which is removed; losing the bind
@@ -26,6 +29,13 @@ const PREFIX: &str = "cce-notes";
 
 static CLAIMED: Mutex<Option<UnixListener>> = Mutex::new(None);
 static OWNED_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// The open note's vault path, for `current`. Set by the app whenever it
+/// changes; read by the listener without a trip through the event loop.
+static CURRENT: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_current(path: Option<&str>) {
+    *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = path.map(String::from);
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -156,6 +166,15 @@ pub fn spawn_listener(sender: calloop::channel::Sender<Message>) -> bool {
             let mut reader = BufReader::new(conn);
             let mut line = String::new();
             if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            if line.trim() == "current" {
+                let cur = CURRENT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let reply = match cur {
+                    Some(p) => format!("ok {p}\n"),
+                    None => "ok\n".to_string(),
+                };
+                let _ = reader.get_mut().write_all(reply.as_bytes());
                 continue;
             }
             let reply: &[u8] = match Command::parse(line.trim()) {
