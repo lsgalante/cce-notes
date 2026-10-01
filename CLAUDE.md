@@ -1,9 +1,11 @@
 # cce-notes
 
-The vault's notes editor — milestone 2 of the Obsidian-on-cce plan, built
-on `cce-vault` (milestone 1). A file tree on the left and one note on the
-right, shown as rendered Markdown (**reading view**) or edited as text
-(**source mode**), toggled with Ctrl+E as in Obsidian.
+The vault's notes editor — milestones 2 and 3 of the Obsidian-on-cce plan,
+built on `cce-vault` (milestone 1). Three panes: files or search on the
+left, one note in the middle — shown as rendered Markdown (**reading
+view**) or edited as text (**source mode**), toggled with Ctrl+E as in
+Obsidian — and backlinks or the outline on the right. Agents reach the
+same vault through its MCP tools.
 
 Read `../cce-vault/CLAUDE.md` first: the index, watcher, writes and the
 `markdown` document model this app draws all live there, along with their
@@ -14,9 +16,13 @@ proposal".
 
 | File | What it owns |
 | --- | --- |
-| `main.rs` | The `Application`: panes, modes, history, quick switcher, autosave, conflicts, input |
+| `main.rs` | The `Application`: panes, modes, history, switcher + rename prompt, completion, autosave, conflicts, input |
 | `reading.rs` | Lays out `cce_vault::markdown::Block`s at a width into draw items + click targets |
 | `tree.rs` | The file tree's rows (folders first, case-insensitive, collapsible) |
+| `panel.rs` | The scrollable header/title/line list both side panes draw through |
+| `side.rs` | What the panes list: backlinks + unlinked mentions, outline, text and tag search |
+| `complete.rs` | `[[` completion: the open link at the caret, the shortest link text, the splice |
+| `mcp.rs` | MCP tools (`search`, `find_notes`, `read_note`, `backlinks`, `open_note`, `append_daily`, `current_note`) |
 | `instance.rs` | Single instance on `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock`; the CLI's commands |
 
 ## Behaviour worth knowing before changing it
@@ -33,6 +39,26 @@ proposal".
 - **Source mode autosaves** 1.5 s after typing stops (`AUTOSAVE_AFTER`,
   polled through `idle_poll_interval` only while dirty), on leaving a note,
   on switching to reading, and in `on_exit`.
+- **Rename (F2, or a click on the title in the band)** goes through
+  `Index::rename`, which rewrites every link to the note across the vault;
+  the prompt previews the count from `plan_rename` before Enter. History
+  entries follow the rename.
+- **`[[` completion** opens while the caret sits in an unclosed `[[` on
+  its line (`complete::open_link`; a `|` or `#` ends it). Enter/Tab
+  inserts the shortest link text that still resolves (`link_text`) and
+  `]]`, recording one undo step (`TextBox::history.record`); Escape shuts
+  it for that link. It needs the caret's pixel position, which TextBox
+  does not expose: `completion_rect` recomputes it from the public
+  `wrap_text`/`char_width`/`line_height`/`scroll_*` the way TextBox's own
+  `selection_quads` does (monospace, 8 px inner pad) — change both if
+  TextBox's padding changes.
+- **Popups over text:** text draws after every plate, so the completion
+  popup is a *hole*: the editor is painted four times, clipped to the
+  bands around the popup (clips intersect), and the popup fills the gap.
+  The quick switcher instead stops painting what it covers.
+- **`load_text` clears the TextBox undo history** and re-syncs
+  `editor_state`; without that, Ctrl+Z after switching notes in source
+  mode stepped back into the previous note's text.
 - **Links:** click in reading, Ctrl+click in source (the caret's byte
   offset is matched against `cce_vault::parse` link spans). An unresolved
   link creates the note at the vault root and opens it in source mode, as
@@ -75,14 +101,23 @@ today, which a long note can churn).
 ```sh
 cce-notes [--vault <dir>] [open] <note>[#heading] [line]   # line is 1-based
 cce-notes daily [YYYY-MM-DD]
-cce-notes search <query>         # opens the quick switcher holding it
+cce-notes search <query>         # the search pane holding it (#tag works)
 ```
 
 A second launch forwards its command to the running instance and exits.
 Keys come from input.kdl's `cce-notes` domain: `quick_switcher` (ctrl+o),
 `toggle_mode` (ctrl+e), `save` (ctrl+s), `reload` (ctrl+r), `back`
 (alt+arrowleft), `forward` (alt+arrowright), `toggle_tree` (ctrl+\\),
-`daily` (alt+d), `quit` (ctrl+q). Mouse back/forward walk the history too.
+`toggle_side` (ctrl+]), `search` (ctrl+shift+f), `rename` (f2), `daily`
+(alt+d), `quit` (ctrl+q). Mouse back/forward walk the history too.
+
+## MCP
+
+`claude mcp add --transport http cce-notes http://127.0.0.1:3002/mcp`.
+Only the single instance serves it, and only with a vault. Tools run on
+the app's event loop against the window's own index, so a write to a note
+open and dirty in the window raises the usual conflict. A shadow instance
+must move the port (`CCE_NOTES_MCP_PORT=3902`) — the live one holds 3002.
 
 ## Testing
 
@@ -91,11 +126,14 @@ tree and the socket commands. Anything visual goes through a shadow at
 `--scale 2` with `CCE_FONTS_DIR` set, against a **copy** of the vault
 (`CCE_VAULT=<copy>`) — never the live vault, which syncs to other devices.
 Fullscreen the window first (`ctl set-mode fullscreen cce-notes`): the
-scale-2 shadow output is only 640×360 logical.
+scale-2 shadow output is only 640×360 logical, too narrow for the right
+pane (it yields below a 360 px note) — check three-pane layout in a
+scale-1 shadow (1280×720) and pointer/caret maths at scale 2.
 
-## Not done yet (milestone 2 → 3)
+## Not done yet
 
-Backlinks and outline panes, `[[` completion, rename, the search pane, tag
-search (a tag click does nothing yet), MCP tools, embedded images, the
-icon (`Icon=cce-notes` has no SVG in cce-icons yet), per-note scroll in
-the history, and the move of the reading view into cce-ui.
+Heading completion (`[[Note#`), rendered snippets in the panes (they show
+raw lines), search debounce for large vaults (it scans every note per
+keystroke), embedded images, the icon (`Icon=cce-notes` has no SVG in
+cce-icons yet), per-note scroll in the history, and the move of the
+reading view into cce-ui.

@@ -20,6 +20,10 @@
 mod instance;
 mod reading;
 mod tree;
+mod complete;
+mod mcp;
+mod panel;
+mod side;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +42,7 @@ use cce_vault::{FileKind, Index, VaultWatcher};
 use wayland_client::QueueHandle;
 
 use instance::Command;
+use panel::{Action, Panel};
 use reading::{srgb_u8, Hit, Layout, Measure, Theme};
 
 const BAND_H: f32 = 40.0;
@@ -51,6 +56,13 @@ const READ_SIZE: f32 = 15.0;
 const SWITCHER_W: f32 = 560.0;
 const SWITCHER_ROW_H: f32 = 28.0;
 const SWITCHER_ROWS: usize = 10;
+const SIDE_W: f32 = 260.0;
+/// The note pane's narrowest before the side pane gives way to it.
+const NOTE_MIN_W: f32 = 360.0;
+const TAB_H: f32 = 30.0;
+const SEARCH_H: f32 = 30.0;
+const COMPLETE_W: f32 = 320.0;
+const COMPLETE_ROW_H: f32 = 24.0;
 /// Source mode saves once typing has paused this long.
 const AUTOSAVE_AFTER: Duration = Duration::from_millis(1500);
 
@@ -64,6 +76,7 @@ const CONFLICT: [f32; 4] = [0.95, 0.45, 0.35, 1.0];
 pub enum Message {
     Command(Command),
     VaultChanged(Vec<PathBuf>),
+    Mcp(cce_ui::mcp::McpToolCall),
     Exit,
 }
 
@@ -85,6 +98,9 @@ struct Keys {
     back: String,
     forward: String,
     toggle_tree: String,
+    toggle_side: String,
+    search: String,
+    rename: String,
     daily: String,
     quit: String,
 }
@@ -100,6 +116,9 @@ impl Keys {
             back: get("back", "alt+arrowleft"),
             forward: get("forward", "alt+arrowright"),
             toggle_tree: get("toggle_tree", "ctrl+\\"),
+            toggle_side: get("toggle_side", "ctrl+]"),
+            search: get("search", "ctrl+shift+f"),
+            rename: get("rename", "f2"),
             daily: get("daily", "alt+d"),
             quit: get("quit", "ctrl+q"),
         }
@@ -110,6 +129,30 @@ impl Keys {
 enum Mode {
     Reading,
     Source,
+}
+
+/// The left pane's tabs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LeftTab {
+    Files,
+    Search,
+}
+
+/// The right pane's tabs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SideTab {
+    Backlinks,
+    Outline,
+}
+
+/// `[[` completion in source mode: the link being typed and its choices.
+struct Completion {
+    /// Char index just past the `[[`.
+    start: usize,
+    query: String,
+    /// Vault paths, best first.
+    choices: Vec<String>,
+    selected: usize,
 }
 
 /// One quick-switcher result: an existing note, or "create this".
@@ -124,6 +167,10 @@ struct Switcher {
     selected: usize,
     /// The query the choices were computed for.
     query: String,
+    /// A rename prompt for this note rather than a switcher.
+    rename: Option<String>,
+    /// A line under the input: what a rename will do, or why it cannot.
+    hint: Option<(String, bool)>,
 }
 
 /// Widths through the renderer's own shaping entry, cached per run.
@@ -188,6 +235,24 @@ struct NotesApp {
     switcher: Option<Switcher>,
     switcher_input: Adapted<TextBox>,
 
+    left_tab: LeftTab,
+    search_input: Adapted<TextBox>,
+    search_panel: Panel,
+    /// The query the search panel shows results for.
+    search_seen: String,
+
+    show_side: bool,
+    side_tab: SideTab,
+    side_panel: Panel,
+    /// What the side panel was built for; a change resets its scroll.
+    side_key: Option<(String, SideTab)>,
+    side_dirty: bool,
+
+    completion: Option<Completion>,
+    /// A `[[` whose completion was dismissed with Escape: it stays shut
+    /// until the caret leaves that link.
+    completion_dismissed: Option<usize>,
+
     conflict: bool,
     status: Option<(String, bool)>,
 
@@ -202,8 +267,19 @@ struct NotesApp {
 
 /// Where everything sits for a window size.
 struct Metrics {
+    /// The whole left pane: tabs, then the tree or the search.
     tree: Rect,
+    left_tabs: Rect,
+    /// The search box, when the search tab shows.
+    search_box: Rect,
+    /// Below the tabs (and search box): the tree's rows or the results.
+    tree_body: Rect,
     note: Rect,
+    side: Rect,
+    side_tabs: Rect,
+    side_body: Rect,
+    /// The note's name in the band; a click renames it.
+    title: Rect,
     mode_chip: Rect,
 }
 
@@ -212,11 +288,29 @@ impl NotesApp {
         let (w, h) = (self.width as f32, self.height as f32);
         let body_h = (h - BAND_H - STATUS_H).max(0.0);
         let tree_w = if self.show_tree && self.index.is_some() { TREE_W.min(w * 0.4) } else { 0.0 };
+        let side_w = if self.show_side && self.current.is_some() && w - tree_w - SIDE_W >= NOTE_MIN_W {
+            SIDE_W
+        } else {
+            0.0
+        };
         let inset = cce_ui::layout::root_plate_inset();
+        let tree = Rect { x: 0.0, y: BAND_H, width: tree_w, height: body_h };
+        let left_tabs = Rect { x: 0.0, y: BAND_H, width: tree_w, height: TAB_H };
+        let search_box = Rect { x: 8.0, y: BAND_H + TAB_H + 4.0, width: (tree_w - 16.0).max(0.0), height: SEARCH_H };
+        let body_top = if self.left_tab == LeftTab::Search { search_box.y + SEARCH_H + 4.0 } else { BAND_H + TAB_H };
+        let side = Rect { x: w - side_w, y: BAND_H, width: side_w, height: body_h };
+        let mode_chip = Rect { x: w - inset - 84.0, y: (BAND_H - 24.0) / 2.0, width: 84.0, height: 24.0 };
         Metrics {
-            tree: Rect { x: 0.0, y: BAND_H, width: tree_w, height: body_h },
-            note: Rect { x: tree_w, y: BAND_H, width: w - tree_w, height: body_h },
-            mode_chip: Rect { x: w - inset - 84.0, y: (BAND_H - 24.0) / 2.0, width: 84.0, height: 24.0 },
+            tree,
+            left_tabs,
+            search_box,
+            tree_body: Rect { x: 0.0, y: body_top, width: tree_w, height: (BAND_H + body_h - body_top).max(0.0) },
+            note: Rect { x: tree_w, y: BAND_H, width: w - tree_w - side_w, height: body_h },
+            side,
+            side_tabs: Rect { x: side.x, y: BAND_H, width: side_w, height: TAB_H },
+            side_body: Rect { x: side.x, y: BAND_H + TAB_H, width: side_w, height: (body_h - TAB_H).max(0.0) },
+            title: Rect { x: inset, y: 0.0, width: (mode_chip.x - 12.0 - inset).max(0.0), height: BAND_H },
+            mode_chip,
         }
     }
 
@@ -241,6 +335,7 @@ impl NotesApp {
         let Some(ix) = &self.index else { return };
         let notes = ix.files().iter().filter(|(_, e)| e.kind == FileKind::Note).map(|(p, _)| p.as_str());
         self.rows = self.tree.rows(notes);
+        self.tree_hover = None;
     }
 
     fn editor_text(&self) -> &str {
@@ -273,9 +368,16 @@ impl NotesApp {
         self.editor.edit_buffer = text.clone();
         self.editor.cursor_idx = 0;
         self.editor.select_anchor = None;
+        self.editor.all_selected = false;
+        self.editor.sync_editor_state();
+        // Undo must not step back into another note's (or the pre-reload)
+        // text.
+        self.editor.history.clear();
+        self.completion = None;
         self.edit_seen = text.clone();
         self.saved = text;
         self.conflict = false;
+        self.side_dirty = true;
         self.invalidate();
     }
 
@@ -341,7 +443,9 @@ impl NotesApp {
             self.read_scroll = 0.0;
             self.read_motion = ScrollMotion::new();
         }
-        self.pending_line = line;
+        if let Some(l) = line {
+            self.goto_line(l);
+        }
         self.tree.reveal(path);
         self.rebuild_rows();
         if record {
@@ -409,8 +513,7 @@ impl NotesApp {
             SpanLink::Url(url) => {
                 let _ = std::process::Command::new("xdg-open").arg(url).spawn();
             }
-            // Tag search comes with the search pane.
-            SpanLink::Tag(_) => {}
+            SpanLink::Tag(tag) => self.open_search(&format!("#{tag}")),
         }
     }
 
@@ -494,7 +597,7 @@ impl NotesApp {
         match cmd {
             Command::Open { target, line } => self.open_target(&target, line),
             Command::Daily(d) => self.open_daily(d),
-            Command::Search(q) => self.open_switcher(&q),
+            Command::Search(q) => self.open_search(&q),
             Command::Show => {}
         }
         self.needs_rebuild = true;
@@ -506,12 +609,18 @@ impl NotesApp {
         let Some(ix) = self.index.as_mut() else { return };
         ix.apply_changes(&paths);
         self.rebuild_rows();
-        // Link colours depend on what resolves.
+        // Link colours, backlinks and search hits depend on every file.
         self.layout = None;
+        self.side_dirty = true;
+        if self.left_tab == LeftTab::Search {
+            self.refresh_search(true);
+        }
         let Some(cur) = self.current.clone() else { return };
         let Some(ix) = self.index.as_ref() else { return };
         let abs = ix.abs(&cur);
-        if !paths.iter().any(|p| p == &abs || p.canonicalize().ok().as_deref() == abs.canonicalize().ok().as_deref()) {
+        let canon = abs.canonicalize().ok();
+        let touches = |p: &PathBuf| p == &abs || (canon.is_some() && p.canonicalize().ok() == canon);
+        if !paths.iter().any(touches) {
             return;
         }
         match ix.read_text(&cur) {
@@ -536,7 +645,8 @@ impl NotesApp {
         self.switcher_input.edit_buffer = query.to_string();
         self.switcher_input.cursor_idx = query.chars().count();
         self.switcher_input.select_anchor = None;
-        self.switcher = Some(Switcher { choices: Vec::new(), selected: 0, query: "\u{0}".into() });
+        self.switcher =
+            Some(Switcher { choices: Vec::new(), selected: 0, query: "\u{0}".into(), rename: None, hint: None });
         self.ui_context.set_focused(&mut self.switcher_input);
         WidgetHost::focus(&mut self.switcher_input);
         self.refresh_switcher();
@@ -565,6 +675,28 @@ impl NotesApp {
         let Some(ix) = &self.index else { return };
         let Some(sw) = self.switcher.as_mut() else { return };
         if sw.query == query {
+            return;
+        }
+        if let Some(from) = sw.rename.clone() {
+            sw.choices = Vec::new();
+            sw.hint = Some(match rename_target(&from, &query) {
+                None => ("Type the note's new name or path".into(), false),
+                Some(to) if to == from => ("Unchanged".into(), false),
+                Some(to) => match ix.plan_rename(&from, &to) {
+                    Ok(plan) => {
+                        let notes: std::collections::BTreeSet<&str> = plan.edits.iter().map(|e| e.path.as_str()).collect();
+                        let what = if plan.edits.is_empty() {
+                            "no links to update".to_string()
+                        } else {
+                            format!("updates {} in {}", side::plural(plan.edits.len(), "link"), side::plural(notes.len(), "note"))
+                        };
+                        (format!("Enter renames to {to} — {what}"), false)
+                    }
+                    Err(e) => (e.to_string(), true),
+                },
+            });
+            sw.query = query;
+            self.needs_rebuild = true;
             return;
         }
         sw.choices = if query.trim().is_empty() {
@@ -615,6 +747,20 @@ impl NotesApp {
     fn switcher_pick(&mut self, create: bool) {
         let Some(sw) = &self.switcher else { return };
         let query = self.switcher_query();
+        if let Some(from) = sw.rename.clone() {
+            match rename_target(&from, &query) {
+                Some(to) if to != from => {
+                    if sw.hint.as_ref().is_some_and(|h| h.1) {
+                        return; // the plan already said why it cannot
+                    }
+                    self.close_switcher();
+                    self.rename(&from, &to);
+                }
+                Some(_) => self.close_switcher(),
+                None => {}
+            }
+            return;
+        }
         let choice = if create { Some(Choice::Create(query.trim().to_string())) } else { sw.choices.get(sw.selected).cloned() };
         self.close_switcher();
         match choice {
@@ -626,7 +772,7 @@ impl NotesApp {
 
     fn switcher_rect(&self) -> Rect {
         let w = SWITCHER_W.min(self.width as f32 - 32.0);
-        let n = self.switcher.as_ref().map_or(0, |s| s.choices.len());
+        let n = self.switcher.as_ref().map_or(0, |s| s.choices.len() + usize::from(s.hint.is_some()));
         Rect {
             x: (self.width as f32 - w) / 2.0,
             y: BAND_H + 24.0,
@@ -643,6 +789,240 @@ impl NotesApp {
         }
         let i = ((y - top) / SWITCHER_ROW_H) as usize;
         (i < self.switcher.as_ref()?.choices.len()).then_some(i)
+    }
+
+    // ---- rename ----------------------------------------------------------
+
+    fn open_rename(&mut self) {
+        let Some(cur) = self.current.clone() else { return };
+        let shown = cur.strip_suffix(".md").unwrap_or(&cur).to_string();
+        self.open_switcher(&shown);
+        if let Some(sw) = self.switcher.as_mut() {
+            sw.rename = Some(cur);
+            sw.query = "\u{0}".into();
+        }
+        self.refresh_switcher();
+    }
+
+    /// Rename (or move) a note and rewrite every link to it, as Obsidian
+    /// does with "automatically update internal links" on.
+    fn rename(&mut self, from: &str, to: &str) {
+        if self.current.as_deref() == Some(from) && !self.save() {
+            return;
+        }
+        let Some(ix) = self.index.as_mut() else { return };
+        match ix.rename(from, to) {
+            Ok(plan) => {
+                for h in &mut self.history {
+                    if h == from {
+                        *h = plan.to.clone();
+                    }
+                }
+                let notes: std::collections::BTreeSet<&str> = plan.edits.iter().map(|e| e.path.as_str()).collect();
+                let msg = format!(
+                    "Renamed to {} · updated {} in {}",
+                    plan.to,
+                    side::plural(plan.edits.len(), "link"),
+                    side::plural(notes.len(), "note")
+                );
+                if self.current.as_deref() == Some(from) {
+                    // Its own self-links may have been rewritten too.
+                    let to = plan.to.clone();
+                    self.current = Some(to.clone());
+                    if let Ok(text) = self.index.as_ref().map(|ix| ix.read_text(&to)).transpose().map(Option::unwrap_or_default) {
+                        let scroll = self.read_scroll;
+                        self.load_text(text);
+                        self.read_scroll = scroll;
+                    }
+                    self.tree.reveal(&to);
+                }
+                self.rebuild_rows();
+                self.side_dirty = true;
+                self.layout = None;
+                self.set_status(msg, false);
+            }
+            Err(e) => self.set_status(format!("Could not rename: {e}"), true),
+        }
+    }
+
+    // ---- side panes ------------------------------------------------------
+
+    fn refresh_side(&mut self) {
+        self.side_dirty = false;
+        let (Some(ix), Some(cur)) = (&self.index, self.current.clone()) else {
+            self.side_panel.set(Vec::new(), true);
+            self.side_key = None;
+            return;
+        };
+        let items = match self.side_tab {
+            SideTab::Backlinks => side::backlinks(ix, &cur),
+            SideTab::Outline => side::outline(ix, &cur),
+        };
+        let key = (cur, self.side_tab);
+        let reset = self.side_key.as_ref() != Some(&key);
+        self.side_panel.set(items, reset);
+        self.side_key = Some(key);
+    }
+
+    fn search_query(&self) -> String {
+        if self.search_input.editing {
+            self.search_input.edit_buffer.clone()
+        } else {
+            self.search_input.text.clone()
+        }
+    }
+
+    /// Rerun the search if the query changed, or always with `force`.
+    fn refresh_search(&mut self, force: bool) {
+        let q = self.search_query();
+        if !force && q == self.search_seen {
+            return;
+        }
+        let Some(ix) = &self.index else { return };
+        let reset = q != self.search_seen;
+        self.search_panel.set(side::search(ix, &q), reset);
+        self.search_seen = q;
+        self.needs_rebuild = true;
+    }
+
+    /// Show the search tab holding `query` (a tag click, Ctrl+Shift+F).
+    fn open_search(&mut self, query: &str) {
+        self.left_tab = LeftTab::Search;
+        self.show_tree = true;
+        self.search_input.text = query.to_string();
+        self.search_input.edit_buffer = query.to_string();
+        self.search_input.cursor_idx = query.chars().count();
+        self.search_input.select_anchor = None;
+        self.search_input.sync_editor_state();
+        self.ui_context.set_focused(&mut self.search_input);
+        WidgetHost::focus(&mut self.search_input);
+        self.refresh_search(true);
+        self.invalidate();
+    }
+
+    fn run_action(&mut self, action: Action) {
+        match action {
+            Action::Open { path, line } => self.open_path(&path, line, true),
+            Action::Line(line) => self.goto_line(line),
+        }
+    }
+
+    /// Bring a 0-based source line of the open note into view: scroll the
+    /// reading view to its block, or put the source caret at its start.
+    fn goto_line(&mut self, line: usize) {
+        match self.mode {
+            Mode::Reading => self.pending_line = Some(line),
+            Mode::Source => {
+                let text = self.editor_text().to_string();
+                let idx: usize = text.split('\n').take(line).map(|l| l.chars().count() + 1).sum();
+                self.ui_context.set_focused(&mut self.editor);
+                WidgetHost::focus(&mut self.editor);
+                self.editor.edit_buffer = text;
+                self.editor.cursor_idx = idx.min(self.editor.edit_buffer.chars().count());
+                self.editor.select_anchor = None;
+                self.editor.all_selected = false;
+                self.editor.sync_editor_state();
+                self.editor.scroll_to_cursor();
+            }
+        }
+        self.needs_rebuild = true;
+    }
+
+    // ---- [[ completion -----------------------------------------------------
+
+    /// Open, update or close the completion for the caret's position.
+    fn update_completion(&mut self) {
+        if self.mode != Mode::Source || !self.editor.editing {
+            self.completion = None;
+            return;
+        }
+        let found = complete::open_link(&self.editor.edit_buffer, self.editor.cursor_idx);
+        let Some((start, query)) = found else {
+            self.completion = None;
+            self.completion_dismissed = None;
+            return;
+        };
+        if self.completion_dismissed == Some(start) {
+            return;
+        }
+        if self.completion.as_ref().is_some_and(|c| c.start == start && c.query == query) {
+            return;
+        }
+        let Some(ix) = &self.index else { return };
+        let choices = complete::choices(ix, &query);
+        self.completion = Some(Completion { start, query, choices, selected: 0 });
+        self.needs_rebuild = true;
+    }
+
+    /// Keys the open completion takes; true when it took this one.
+    fn completion_key(&mut self, key: &Key) -> bool {
+        let Some(c) = self.completion.as_mut() else { return false };
+        if c.choices.is_empty() {
+            return false;
+        }
+        let n = c.choices.len();
+        match key {
+            Key::Named(NamedKey::ArrowDown) => c.selected = (c.selected + 1) % n,
+            Key::Named(NamedKey::ArrowUp) => c.selected = (c.selected + n - 1) % n,
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => self.accept_completion(),
+            Key::Named(NamedKey::Escape) => {
+                self.completion_dismissed = Some(c.start);
+                self.completion = None;
+            }
+            _ => return false,
+        }
+        self.needs_rebuild = true;
+        true
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(c) = self.completion.take() else { return };
+        let (Some(ix), Some(path)) = (&self.index, c.choices.get(c.selected)) else { return };
+        let link = complete::link_text(ix, self.current.as_deref(), path);
+        let e = &mut self.editor;
+        let before = cce_ui::widget::editor::TextEditorState {
+            buffer: e.edit_buffer.clone(),
+            cursor_idx: e.cursor_idx,
+            select_anchor: e.select_anchor,
+            all_selected: e.all_selected,
+        };
+        let (text, caret) = complete::apply(&e.edit_buffer, c.start, e.cursor_idx, &link);
+        e.history.record(before);
+        e.edit_buffer = text;
+        e.cursor_idx = caret;
+        e.select_anchor = None;
+        e.all_selected = false;
+        e.sync_editor_state();
+        e.scroll_to_cursor();
+    }
+
+    /// The completion popup's rect, under the caret and inside the note pane.
+    fn completion_rect(&self, m: &Metrics) -> Option<Rect> {
+        let c = self.completion.as_ref().filter(|c| !c.choices.is_empty())?;
+        let e = &self.editor;
+        let r = self.editor_rect(m);
+        let (cw, lh) = (e.char_width(), e.line_height());
+        let max_chars = (((r.width - 16.0) / cw).floor() as usize).max(1);
+        let (_, map) = e.wrap_text(max_chars);
+        let (line, col) = *map.get(e.cursor_idx.min(map.len().saturating_sub(1)))?;
+        let caret_x = r.x + 8.0 + col as f32 * cw - e.scroll_x;
+        let caret_y = r.y + 8.0 + line as f32 * lh - e.scroll_y;
+        let h = c.choices.len() as f32 * COMPLETE_ROW_H + 8.0;
+        let w = COMPLETE_W.min(r.width);
+        let x = caret_x.min(r.x + r.width - w).max(r.x);
+        // Below the caret line, or above it when there is no room below.
+        let below = caret_y + lh + 2.0;
+        let y = if below + h <= r.y + r.height { below } else { (caret_y - h - 2.0).max(r.y) };
+        Some(Rect { x, y, width: w, height: h })
+    }
+
+    fn completion_row_at(&self, m: &Metrics, x: f32, y: f32) -> Option<usize> {
+        let r = self.completion_rect(m)?;
+        if !contains(r, x, y) {
+            return None;
+        }
+        let i = ((y - r.y - 4.0) / COMPLETE_ROW_H).floor();
+        (i >= 0.0 && (i as usize) < self.completion.as_ref()?.choices.len()).then_some(i as usize)
     }
 
     // ---- layout and scrolling -------------------------------------------
@@ -671,14 +1051,14 @@ impl NotesApp {
     }
 
     fn tree_max_scroll(&self, m: &Metrics) -> f32 {
-        (self.rows.len() as f32 * TREE_ROW_H + 8.0 - m.tree.height).max(0.0)
+        (self.rows.len() as f32 * TREE_ROW_H + 8.0 - m.tree_body.height).max(0.0)
     }
 
     fn tree_row_at(&self, m: &Metrics, x: f32, y: f32) -> Option<usize> {
-        if x < m.tree.x || x > m.tree.x + m.tree.width || y < m.tree.y || y > m.tree.y + m.tree.height {
+        if self.left_tab != LeftTab::Files || !contains(m.tree_body, x, y) {
             return None;
         }
-        let i = ((y - m.tree.y - 4.0 + self.tree_scroll) / TREE_ROW_H).floor();
+        let i = ((y - m.tree_body.y - 4.0 + self.tree_scroll) / TREE_ROW_H).floor();
         (i >= 0.0 && (i as usize) < self.rows.len()).then_some(i as usize)
     }
 
@@ -778,7 +1158,8 @@ impl NotesApp {
         } else if let (Some(cur), Some(ix)) = (&self.current, &self.index) {
             let text = if self.mode == Mode::Source { self.editor_text() } else { self.saved.as_str() };
             let words = text.split_whitespace().count();
-            let back = ix.backlinks(cur).len();
+            // Notes linking here, as the backlinks pane counts them.
+            let back = ix.backlinks(cur).iter().filter(|b| b.source != cur).map(|b| b.source).collect::<std::collections::HashSet<_>>().len();
             (format!("{} · {}", plural(words, "word"), plural(back, "backlink")), DIM)
         } else {
             (String::new(), DIM)
@@ -795,8 +1176,28 @@ impl NotesApp {
         if m.tree.width <= 0.0 {
             return;
         }
-        let t = m.tree;
-        pc.recess_edges(t, (0.0, 0.0, 0.0, 0.0), cce_ui::layout::bar_wall_width(), (false, true, false, false));
+        pc.recess_edges(m.tree, (0.0, 0.0, 0.0, 0.0), cce_ui::layout::bar_wall_width(), (false, true, false, false));
+        let active = if self.left_tab == LeftTab::Files { 0 } else { 1 };
+        paint_tabs(pc, m.left_tabs, &["Files", "Search"], active);
+        if self.left_tab == LeftTab::Search {
+            cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.search_input, pc);
+            if self.search_panel.items.is_empty() {
+                let (family, size) = cce_ui::layout::tree_font_parsed();
+                let b = m.tree_body;
+                pc.text_with(
+                    "Words, or #tag",
+                    b.x + 12.0,
+                    b.y + 10.0,
+                    (size * 0.9).round(),
+                    srgb_u8(DIM),
+                    Some(family),
+                    Some([b.x, b.y, b.x + b.width, b.y + b.height]),
+                );
+            }
+            self.search_panel.paint(pc, m.tree_body);
+            return;
+        }
+        let t = m.tree_body;
         let (family, size) = cce_ui::layout::tree_font_parsed();
         pc.clip(t, |pc| {
             for (i, row) in self.rows.iter().enumerate() {
@@ -869,7 +1270,26 @@ impl NotesApp {
             return;
         }
         match self.mode {
-            Mode::Source => cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.editor, pc),
+            Mode::Source => match self.completion_rect(m) {
+                // Text draws over every plate, so the popup cannot simply
+                // cover the editor: paint the editor four times, clipped to
+                // the bands around the popup, and the popup into the hole.
+                Some(hole) => {
+                    let e = self.editor_rect(m);
+                    let (l, t, r, b) = (e.x - 4.0, e.y - 4.0, e.x + e.width + 4.0, e.y + e.height + 4.0);
+                    let bands = [
+                        Rect { x: l, y: t, width: r - l, height: hole.y - t },
+                        Rect { x: l, y: hole.y + hole.height, width: r - l, height: b - hole.y - hole.height },
+                        Rect { x: l, y: hole.y, width: hole.x - l, height: hole.height },
+                        Rect { x: hole.x + hole.width, y: hole.y, width: r - hole.x - hole.width, height: hole.height },
+                    ];
+                    for band in bands.into_iter().filter(|b| b.width > 0.0 && b.height > 0.0) {
+                        pc.clip(band, |pc| cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.editor, pc));
+                    }
+                    self.paint_completion(pc, hole);
+                }
+                None => cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.editor, pc),
+            },
             Mode::Reading => {
                 let (ox, oy, width) = self.reading_frame(m);
                 self.ensure_layout(width);
@@ -913,6 +1333,102 @@ impl NotesApp {
                 Some([row.x, row.y, row.x + row.width - 6.0, row.y + row.height]),
             );
         }
+        if let Some((hint, err)) = &sw.hint {
+            let y = top + sw.choices.len() as f32 * SWITCHER_ROW_H;
+            let row = Rect { x: r.x + 6.0, y, width: r.width - 12.0, height: SWITCHER_ROW_H };
+            pc.text_with(
+                hint.clone(),
+                row.x + 10.0,
+                cce_ui::layout::align_text_y(row.y, row.height, size, 0.0),
+                size,
+                srgb_u8(if *err { CONFLICT } else { DIM }),
+                Some(family.clone()),
+                Some([row.x, row.y, row.x + row.width - 6.0, row.y + row.height]),
+            );
+        }
+    }
+
+    fn paint_side(&self, pc: &mut PaintCtx, m: &Metrics) {
+        if m.side.width <= 0.0 {
+            return;
+        }
+        pc.recess_edges(m.side, (0.0, 0.0, 0.0, 0.0), cce_ui::layout::bar_wall_width(), (false, false, false, true));
+        let active = if self.side_tab == SideTab::Backlinks { 0 } else { 1 };
+        paint_tabs(pc, m.side_tabs, &["Backlinks", "Outline"], active);
+        self.side_panel.paint(pc, m.side_body);
+    }
+
+    fn paint_completion(&self, pc: &mut PaintCtx, r: Rect) {
+        let Some(c) = &self.completion else { return };
+        pc.rounded_rect(r, 8.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_BG);
+        let (family, size) = cce_ui::layout::list_font_parsed();
+        for (i, path) in c.choices.iter().enumerate() {
+            let row = Rect { x: r.x + 4.0, y: r.y + 4.0 + i as f32 * COMPLETE_ROW_H, width: r.width - 8.0, height: COMPLETE_ROW_H };
+            if i == c.selected {
+                pc.rounded_rect(row, 5.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_HOVER);
+            }
+            let (dir, file) = match path.rsplit_once('/') {
+                Some((d, f)) => (Some(d), f),
+                None => (None, path.as_str()),
+            };
+            let name = file.strip_suffix(".md").unwrap_or(file);
+            let ty = cce_ui::layout::align_text_y(row.y, row.height, size, 0.0);
+            let bounds = Some([row.x, row.y, row.x + row.width - 6.0, row.y + row.height]);
+            pc.text_with(name.to_string(), row.x + 8.0, ty, size, srgb_u8(FG), Some(family.clone()), bounds);
+            if let Some(d) = dir {
+                let nx = row.x + 8.0 + (name.chars().count() as f32 + 2.0) * size * 0.6;
+                pc.text_with(d.to_string(), nx, ty, size, srgb_u8(DIM), Some(family.clone()), bounds);
+            }
+        }
+    }
+}
+
+/// Equal-width text tabs across `r`, the active one underlined.
+fn paint_tabs(pc: &mut PaintCtx, r: Rect, labels: &[&str], active: usize) {
+    if r.width <= 0.0 {
+        return;
+    }
+    let (family, size) = cce_ui::layout::tree_font_parsed();
+    let w = r.width / labels.len() as f32;
+    for (i, label) in labels.iter().enumerate() {
+        let cell = Rect { x: r.x + i as f32 * w, y: r.y, width: w, height: r.height };
+        let lw = label.chars().count() as f32 * size * 0.6;
+        let color = if i == active { FG } else { DIM };
+        pc.text_with(
+            label.to_string(),
+            cell.x + ((cell.width - lw) / 2.0).max(4.0),
+            cce_ui::layout::align_text_y(cell.y, cell.height, size, 0.0),
+            size,
+            srgb_u8(color),
+            Some(family.clone()),
+            Some([cell.x, cell.y, cell.x + cell.width, cell.y + cell.height]),
+        );
+        if i == active {
+            let u = Rect { x: cell.x + 14.0, y: cell.y + cell.height - 3.0, width: (cell.width - 28.0).max(4.0), height: 2.0 };
+            pc.rounded_rect(u, 1.0, (true, true, true, true), cce_ui::colors::to_linear([0.66, 0.55, 0.98, 1.0]));
+        }
+    }
+}
+
+fn tab_at(r: Rect, n: usize, x: f32, y: f32) -> Option<usize> {
+    if r.width <= 0.0 || !contains(r, x, y) {
+        return None;
+    }
+    Some((((x - r.x) / (r.width / n as f32)) as usize).min(n - 1))
+}
+
+/// The vault path a rename prompt's text names: `.md` added unless it
+/// names another extension the note already had. `None` while empty.
+fn rename_target(from: &str, query: &str) -> Option<String> {
+    let q = query.trim().trim_start_matches('/').trim_end_matches('/');
+    if q.is_empty() {
+        return None;
+    }
+    let keeps_ext = !from.to_lowercase().ends_with(".md") && from.rsplit('.').next() == q.rsplit('.').next();
+    if q.to_lowercase().ends_with(".md") || keeps_ext {
+        Some(q.to_string())
+    } else {
+        Some(format!("{q}.md"))
     }
 }
 
@@ -920,9 +1436,7 @@ fn contains(r: Rect, x: f32, y: f32) -> bool {
     x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height
 }
 
-fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
-}
+use side::plural;
 
 fn vault_name(root: &Path) -> String {
     root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string())
@@ -959,13 +1473,18 @@ impl Application for NotesApp {
             },
             Err(e) => (None, Some(e.clone()), None),
         };
-        instance::spawn_listener(sender.clone());
+        // Only the instance serves MCP: a second copy running standalone
+        // would fight it for the port.
+        if instance::spawn_listener(sender.clone()) && index.is_some() {
+            mcp::start(sender.clone());
+        }
         let _ = sender.send(Message::Command(startup.command.clone()));
 
         let mut editor = TextBox::new(String::new()).with_multiline(true).with_draw_bg_border(true).with_max_width(None);
         editor.font_family = "monospace".to_string();
         editor.font_size = 13.0;
         let switcher_input = TextBox::new(String::new()).with_placeholder("Find or create a note…");
+        let search_input = TextBox::new(String::new()).with_placeholder("Search");
 
         let mut app = NotesApp {
             keys: Keys::load(),
@@ -997,6 +1516,17 @@ impl Application for NotesApp {
             hist_pos: 0,
             switcher: None,
             switcher_input,
+            left_tab: LeftTab::Files,
+            search_input,
+            search_panel: Panel::default(),
+            search_seen: String::new(),
+            show_side: true,
+            side_tab: SideTab::Backlinks,
+            side_panel: Panel::default(),
+            side_key: None,
+            side_dirty: true,
+            completion: None,
+            completion_dismissed: None,
             conflict: false,
             status: None,
             width: 1000,
@@ -1026,6 +1556,7 @@ impl Application for NotesApp {
         match msg {
             Message::Command(cmd) => self.run_command(cmd),
             Message::VaultChanged(paths) => self.vault_changed(paths),
+            Message::Mcp(call) => self.mcp_call(call),
             Message::Exit => *_exit = true,
         }
         *needs_rebuild = true;
@@ -1053,6 +1584,9 @@ impl Application for NotesApp {
             self.tree_scroll = self.tree_motion.y.pos();
             *needs_rebuild = true;
         }
+        if self.search_panel.tick(dt, m.tree_body) | self.side_panel.tick(dt, m.side_body) {
+            *needs_rebuild = true;
+        }
         if self.dirty() && !self.conflict {
             let now = Instant::now();
             if self.editor_text() != self.edit_seen {
@@ -1071,6 +1605,8 @@ impl Application for NotesApp {
             let (id, ptr) = (self.editor.id(), self.editor.as_ptr_mut());
             self.ui_context.register_widget(id, ptr);
             let (id, ptr) = (self.switcher_input.id(), self.switcher_input.as_ptr_mut());
+            self.ui_context.register_widget(id, ptr);
+            let (id, ptr) = (self.search_input.id(), self.search_input.as_ptr_mut());
             self.ui_context.register_widget(id, ptr);
         }
         let size_changed =
@@ -1091,10 +1627,17 @@ impl Application for NotesApp {
             self.editor.set_rect(e.x, e.y, e.width, e.height);
             let r = self.switcher_rect();
             self.switcher_input.set_rect(r.x + 12.0, r.y + 12.0, r.width - 24.0, 32.0);
+            let sb = m.search_box;
+            self.search_input.set_rect(sb.x, sb.y, sb.width, sb.height);
             self.needs_rebuild = false;
             self.ui_context.rebuild_spatial_grid();
             // Keep scroll offsets in range after a resize or a new layout.
             self.tree_scroll = self.tree_scroll.min(self.tree_max_scroll(&m));
+            self.search_panel.clamp(m.tree_body);
+            self.side_panel.clamp(m.side_body);
+        }
+        if self.side_dirty && m.side.width > 0.0 {
+            self.refresh_side();
         }
 
         let (w, h) = (self.width as f32, self.height as f32);
@@ -1103,6 +1646,7 @@ impl Application for NotesApp {
         self.paint_band(&mut pc, &m);
         if self.switcher.is_none() {
             self.paint_tree(&mut pc, &m);
+            self.paint_side(&mut pc, &m);
         }
         self.paint_note(&mut pc, &m);
         let max = self.read_max_scroll(&m);
@@ -1128,10 +1672,19 @@ impl Application for NotesApp {
     }
 
     fn cursor_icon(&self, x: f32, y: f32) -> Option<CursorIcon> {
-        if self.hover_hit || self.tree_hover.is_some() {
+        let m = self.metrics();
+        let over_title = self.current.is_some() && self.switcher.is_none() && contains(m.title, x, y);
+        if self.hover_hit
+            || self.tree_hover.is_some()
+            || self.search_panel.hover.is_some()
+            || self.side_panel.hover.is_some()
+            || over_title
+        {
             return Some(CursorIcon::Pointer);
         }
-        let m = self.metrics();
+        if self.left_tab == LeftTab::Search && contains(m.search_box, x, y) {
+            return Some(CursorIcon::Text);
+        }
         (self.mode == Mode::Source && self.switcher.is_none() && contains(self.editor_rect(&m), x, y))
             .then_some(CursorIcon::Text)
     }
@@ -1166,6 +1719,13 @@ impl Application for NotesApp {
         let hover = self.tree_row_at(&m, x, y);
         if hover != self.tree_hover {
             self.tree_hover = hover;
+            *needs_rebuild = true;
+        }
+        let search_area = if self.left_tab == LeftTab::Search { m.tree_body } else { Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 } };
+        if self.search_panel.hover_at(search_area, x, y) | self.side_panel.hover_at(m.side_body, x, y) {
+            *needs_rebuild = true;
+        }
+        if self.left_tab == LeftTab::Search && self.ui_context.propagate_event(&ev, self.search_input.id()) {
             *needs_rebuild = true;
         }
         let hit = self.reading_hit(x, y).is_some();
@@ -1209,6 +1769,52 @@ impl Application for NotesApp {
         }
 
         let m = self.metrics();
+        // The search box keeps the keyboard only while it is clicked into.
+        let in_search = self.left_tab == LeftTab::Search && contains(m.search_box, x, y);
+        if pressed && !in_search && self.search_input.editing {
+            self.search_input.unfocus();
+        }
+        if in_search {
+            if pressed && !self.search_input.editing {
+                self.editor.unfocus();
+                self.ui_context.set_focused(&mut self.search_input);
+                WidgetHost::focus(&mut self.search_input);
+            }
+            self.ui_context.propagate_event(&ev, self.search_input.id());
+            return None;
+        }
+        if pressed {
+            if let Some(i) = self.completion_row_at(&m, x, y) {
+                if let Some(c) = self.completion.as_mut() {
+                    c.selected = i;
+                }
+                self.accept_completion();
+                return None;
+            }
+            if let Some(t) = tab_at(m.left_tabs, 2, x, y) {
+                self.left_tab = if t == 0 { LeftTab::Files } else { LeftTab::Search };
+                if self.left_tab == LeftTab::Search {
+                    let q = self.search_query();
+                    self.open_search(&q);
+                }
+                self.needs_rebuild = true;
+                return None;
+            }
+            if let Some(t) = tab_at(m.side_tabs, 2, x, y) {
+                self.side_tab = if t == 0 { SideTab::Backlinks } else { SideTab::Outline };
+                self.side_dirty = true;
+                return None;
+            }
+            let search_area = if self.left_tab == LeftTab::Search { m.tree_body } else { Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 } };
+            if let Some(a) = self.search_panel.click(search_area, x, y).or_else(|| self.side_panel.click(m.side_body, x, y)) {
+                self.run_action(a);
+                return None;
+            }
+            if self.current.is_some() && contains(m.title, x, y) {
+                self.open_rename();
+                return None;
+            }
+        }
         if pressed && contains(m.mode_chip, x, y) && self.current.is_some() {
             let next = if self.mode == Mode::Reading { Mode::Source } else { Mode::Reading };
             self.set_mode(next);
@@ -1254,8 +1860,10 @@ impl Application for NotesApp {
             if ctrl_click && contains(self.editor_rect(&m), x, y) {
                 if let Some(link) = self.link_at_caret() {
                     self.follow(link);
+                    return None;
                 }
             }
+            self.update_completion();
         }
         None
     }
@@ -1266,7 +1874,19 @@ impl Application for NotesApp {
             return;
         }
         let m = self.metrics();
-        if contains(m.tree, x, y) {
+        if contains(m.side_body, x, y) {
+            if self.side_panel.wheel(delta, m.side_body) {
+                *needs_rebuild = true;
+            }
+            return;
+        }
+        if self.left_tab == LeftTab::Search && contains(m.tree_body, x, y) {
+            if self.search_panel.wheel(delta, m.tree_body) {
+                *needs_rebuild = true;
+            }
+            return;
+        }
+        if contains(m.tree_body, x, y) && self.left_tab == LeftTab::Files {
             let max = self.tree_max_scroll(&m);
             self.tree_motion.reconcile(0.0, self.tree_scroll);
             if self.tree_motion.apply(delta, (TREE_ROW_H, TREE_ROW_H), Bounds::max(0.0), Bounds::max(max)) {
@@ -1376,11 +1996,56 @@ impl Application for NotesApp {
                 self.open_daily(None);
                 return None;
             }
+            if k(&self.keys.toggle_side) {
+                self.show_side = !self.show_side;
+                self.side_dirty = true;
+                self.invalidate();
+                return None;
+            }
+            if k(&self.keys.search) && self.index.is_some() {
+                let q = self.search_query();
+                self.open_search(&q);
+                self.search_input.select_all();
+                return None;
+            }
+            if k(&self.keys.rename) && self.current.is_some() {
+                self.open_rename();
+                return None;
+            }
+        }
+
+        // The search box, while it holds the keyboard.
+        if self.search_input.editing {
+            if pressed {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.search_input.unfocus();
+                        return None;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        // Enter opens the first result.
+                        let first = self.search_panel.items.iter().find_map(|i| i.action.clone());
+                        if let Some(a) = first {
+                            self.search_input.unfocus();
+                            self.run_action(a);
+                        }
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            self.ui_context.propagate_event(&ev, self.search_input.id());
+            self.refresh_search(false);
+            return None;
         }
 
         match self.mode {
             Mode::Source => {
+                if pressed && self.completion_key(&event.logical_key) {
+                    return None;
+                }
                 self.ui_context.propagate_event(&ev, self.editor.id());
+                self.update_completion();
             }
             Mode::Reading if pressed => {
                 let m = self.metrics();

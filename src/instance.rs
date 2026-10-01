@@ -9,7 +9,7 @@
 //! - `open <path>[#heading] [line]` — a vault path, an absolute path inside
 //!   the vault, or a note name; `line` is 1-based.
 //! - `daily [YYYY-MM-DD]` — open (creating it from the template) a day's note.
-//! - `search <query>` — open the quick switcher holding `query`.
+//! - `search <query>` — show the search pane holding `query` (`#tag` too).
 //! - `show` — nothing but bringing the instance up.
 //!
 //! Connect before binding, as cce-browser does: a refused connect means a
@@ -143,10 +143,12 @@ fn try_forward(path: &str, cmd: &Command) -> bool {
     BufReader::new(stream).read_line(&mut reply).is_ok()
 }
 
-/// Serve the claimed listener on a thread, feeding the app's loop.
-pub fn spawn_listener(sender: calloop::channel::Sender<Message>) {
+/// Serve the claimed listener on a thread, feeding the app's loop. False
+/// when this process holds no listener (single-instance handling failed
+/// and it runs standalone).
+pub fn spawn_listener(sender: calloop::channel::Sender<Message>) -> bool {
     let Some(listener) = CLAIMED.lock().unwrap().take() else {
-        return;
+        return false;
     };
     std::thread::spawn(move || {
         for conn in listener.incoming() {
@@ -168,6 +170,7 @@ pub fn spawn_listener(sender: calloop::channel::Sender<Message>) {
             let _ = reader.get_mut().write_all(reply);
         }
     });
+    true
 }
 
 pub fn cleanup() {

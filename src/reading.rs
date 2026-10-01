@@ -89,7 +89,8 @@ impl Draw {
 pub struct Layout {
     pub draws: Vec<Draw>,
     pub hits: Vec<(Rect, Hit)>,
-    /// Each block's first source line and the y it starts at, in order.
+    /// Each block's (and list item's) first source line and the y it
+    /// starts at, in source order.
     pub lines: Vec<(usize, f32)>,
     pub height: f32,
 }
@@ -277,6 +278,10 @@ impl<'a> Layouter<'a> {
         for (i, item) in items.iter().enumerate() {
             if i > 0 {
                 y += 2.0;
+            }
+            // Items are where a search hit or a task usually points.
+            if self.out.lines.last().is_none_or(|(l, _)| *l < item.line) {
+                self.out.lines.push((item.line, y));
             }
             let body_x = x + INDENT;
             let mid = y + lh / 2.0;
@@ -803,7 +808,7 @@ mod tests {
             _ => None,
         }).collect();
         assert_eq!(tasks, [(2, ' '), (3, 'x')]);
-        assert_eq!(l.lines.iter().map(|(l, _)| *l).collect::<Vec<_>>(), [0, 2, 5]);
+        assert_eq!(l.lines.iter().map(|(l, _)| *l).collect::<Vec<_>>(), [0, 2, 3, 5]);
         assert!(l.y_of_line(5) > l.y_of_line(2));
     }
 
