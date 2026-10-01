@@ -25,14 +25,13 @@ mod mcp;
 mod panel;
 mod side;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use cce_ui::engine::{Application, CursorIcon, EngineState, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
-use cce_ui::scene::paint::{DisplayList, PaintCtx, TextAttrs};
+use cce_ui::scene::paint::{DisplayList, PaintCtx};
 use cce_ui::widget::{
     Adapted, Bounds, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta, NamedKey, ScrollMotion,
     TextBox, WidgetHost,
@@ -43,7 +42,7 @@ use wayland_client::QueueHandle;
 
 use instance::Command;
 use panel::{Action, Panel};
-use reading::{srgb_u8, Hit, Layout, Measure, Theme};
+use reading::{srgb_u8, Hit, Layout, ShapingMeasure, Theme};
 
 const BAND_H: f32 = 40.0;
 const STATUS_H: f32 = 26.0;
@@ -175,26 +174,6 @@ struct Switcher {
     hint: Option<(String, bool)>,
 }
 
-/// Widths through the renderer's own shaping entry, cached per run.
-struct RendererMeasure<'a> {
-    fs: &'a mut cce_ui::cosmic_text::FontSystem,
-    scale: f32,
-    cache: &'a mut HashMap<(String, u32, String, TextAttrs), f32>,
-}
-
-impl Measure for RendererMeasure<'_> {
-    fn width(&mut self, text: &str, size: f32, font: &str, attrs: TextAttrs) -> f32 {
-        let key = (text.to_string(), (size * 100.0) as u32, font.to_string(), attrs);
-        if let Some(w) = self.cache.get(&key) {
-            return *w;
-        }
-        let buf = cce_ui::backend::window_runner::get_text_buffer_attrs(self.fs, text, size, Some(font), attrs);
-        let w = buf.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) / self.scale;
-        self.cache.insert(key, w);
-        w
-    }
-}
-
 struct NotesApp {
     keys: Keys,
     index: Option<Index>,
@@ -215,10 +194,9 @@ struct NotesApp {
     blocks: Vec<Block>,
     theme: Theme,
     layout: Option<(f32, Layout)>,
-    widths: HashMap<(String, u32, String, TextAttrs), f32>,
     /// Shapes for layout widths; loads the same fonts as the renderer
     /// (system fonts included, see `load_system_fonts`). Made on first use.
-    measure_fs: Option<cce_ui::cosmic_text::FontSystem>,
+    measure: Option<ShapingMeasure>,
     mode: Mode,
     read_scroll: f32,
     read_motion: ScrollMotion,
@@ -1035,8 +1013,7 @@ impl NotesApp {
         if matches!(&self.layout, Some((w, _)) if (w - width).abs() < 0.5) {
             return;
         }
-        let fs = self.measure_fs.get_or_insert_with(cce_ui::create_font_system_with_system_fonts);
-        let mut m = RendererMeasure { fs, scale: self.scale as f32, cache: &mut self.widths };
+        let m = self.measure.get_or_insert_with(|| ShapingMeasure::new(true));
         let index = &self.index;
         let cur = self.current.as_deref();
         let resolved = |l: &SpanLink| match l {
@@ -1045,7 +1022,7 @@ impl NotesApp {
             }
             _ => true,
         };
-        let laid = reading::layout(&self.blocks, width, &self.theme, &mut m, &resolved);
+        let laid = reading::layout(&self.blocks, width, &self.theme, m, &resolved);
         self.layout = Some((width, laid));
     }
 
@@ -1506,8 +1483,7 @@ impl Application for NotesApp {
             blocks: Vec::new(),
             theme: Theme { body_font: "sans-serif".into(), mono_font: "monospace".into(), size: READ_SIZE },
             layout: None,
-            widths: HashMap::new(),
-            measure_fs: None,
+            measure: None,
             mode: Mode::Reading,
             read_scroll: 0.0,
             read_motion: ScrollMotion::new(),
@@ -1617,7 +1593,6 @@ impl Application for NotesApp {
             self.width != size.width as u32 || self.height != size.height as u32 || self.scale != scale;
         if size_changed {
             if self.scale != scale {
-                self.widths.clear();
                 self.layout = None;
             }
             self.width = size.width as u32;
