@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Notes
+Comment=Read and edit the notes vault
+Exec=cce-notes %f
+Icon=cce-notes
+Categories=Office;Utility;TextEditor;
+Terminal=false
+StartupNotify=true
+StartupWMClass=cce-notes
+MimeType=text/markdown;
