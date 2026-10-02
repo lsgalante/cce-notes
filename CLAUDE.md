@@ -81,8 +81,11 @@ proposal".
 A paragraph that is one `![[pic.png]]` / `![](pic.png)` draws as the
 picture in reading and in live preview (cce-ui's `markdown::layout_with`
 and `DocEditor::set_images`; Obsidian's `|300` / `|300x200` sizes
-honoured, too-wide images scaled to the column). Inline embeds inside a
-sentence and note embeds (`![[Note]]`) still show as links.
+honoured, too-wide images scaled to the column). An image embed inside a
+sentence flows with the text in reading view (its line grows to fit) and
+shows in a row below its line in live preview — the editor's rows are one
+height, so a picture cannot sit inside one. Note embeds (`![[Note]]`)
+still show as links.
 
 - **Asked for while painting, loaded after.** A lookup the cache cannot
   answer is only recorded; `Images::pump`, at the end of `display_list`,
@@ -199,8 +202,8 @@ scale-1 shadow (1280×720) and pointer/caret maths at scale 2.
 
 In the editor: property values are edited as raw YAML (the table flips
 to raw when the caret enters; Obsidian edits in place), tables and
-callouts show raw, note embeds (`![[Note]]`) and embeds inside a sentence
-show as links (standalone image embeds render), and a fenced block has no language label or copy button. Also heading
+callouts show raw, note embeds (`![[Note]]`) show as links (image embeds
+render; mid-sentence ones below their line rather than inside it), and a fenced block has no language label or copy button. Also heading
 completion (`[[Note#`), rendered snippets in the panes (they show
 raw lines), search debounce for large vaults (it scans every note per
 keystroke), the icon (`Icon=cce-notes` has no SVG in
