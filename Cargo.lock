@@ -419,7 +419,7 @@ version = "0.1.0"
 dependencies = [
  "calloop",
  "cce-ui",
- "cce-vault 0.1.0 (git+https://github.com/lsgalante/cce-vault.git?rev=41ca52bd51ea3655a791c58005be9fce939e4333)",
+ "cce-vault",
  "chrono",
  "env_logger",
  "image",
@@ -434,14 +434,14 @@ dependencies = [
 [[package]]
 name = "cce-ui"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-ui.git?rev=947a0641dd38a31bd580ba132c8dea5a8e60e423#947a0641dd38a31bd580ba132c8dea5a8e60e423"
+source = "git+https://github.com/lsgalante/cce-ui.git?rev=25989d64afc740daae92a0ee0852a79f2eb5621d#25989d64afc740daae92a0ee0852a79f2eb5621d"
 dependencies = [
  "ash",
  "bitflags 2.13.2",
  "bytemuck",
  "calloop",
  "calloop-wayland-source",
- "cce-vault 0.1.0 (git+https://github.com/lsgalante/cce-vault.git?rev=827f72f6755871c6badc564626bc3813b0c58799)",
+ "cce-vault",
  "cosmic-text",
  "glam",
  "gpu-allocator",
@@ -467,24 +467,6 @@ dependencies = [
 name = "cce-vault"
 version = "0.1.0"
 source = "git+https://github.com/lsgalante/cce-vault.git?rev=41ca52bd51ea3655a791c58005be9fce939e4333#41ca52bd51ea3655a791c58005be9fce939e4333"
-dependencies = [
- "chrono",
- "indexmap",
- "kdl",
- "log",
- "notify",
- "percent-encoding",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "walkdir",
- "yaml-rust2",
-]
-
-[[package]]
-name = "cce-vault"
-version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-vault.git?rev=827f72f6755871c6badc564626bc3813b0c58799#827f72f6755871c6badc564626bc3813b0c58799"
 dependencies = [
  "chrono",
  "indexmap",
