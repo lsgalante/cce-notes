@@ -419,11 +419,12 @@ version = "0.1.0"
 dependencies = [
  "calloop",
  "cce-ui",
- "cce-vault",
+ "cce-vault 0.1.0 (git+https://github.com/lsgalante/cce-vault.git?rev=41ca52bd51ea3655a791c58005be9fce939e4333)",
  "chrono",
  "env_logger",
  "image",
  "log",
+ "percent-encoding",
  "resvg",
  "serde_json",
  "tempfile",
@@ -440,7 +441,7 @@ dependencies = [
  "bytemuck",
  "calloop",
  "calloop-wayland-source",
- "cce-vault",
+ "cce-vault 0.1.0 (git+https://github.com/lsgalante/cce-vault.git?rev=827f72f6755871c6badc564626bc3813b0c58799)",
  "cosmic-text",
  "glam",
  "gpu-allocator",
@@ -460,6 +461,24 @@ dependencies = [
  "wayland-protocols 0.31.2",
  "wayland-scanner",
  "xkeysym",
+]
+
+[[package]]
+name = "cce-vault"
+version = "0.1.0"
+source = "git+https://github.com/lsgalante/cce-vault.git?rev=41ca52bd51ea3655a791c58005be9fce939e4333#41ca52bd51ea3655a791c58005be9fce939e4333"
+dependencies = [
+ "chrono",
+ "indexmap",
+ "kdl",
+ "log",
+ "notify",
+ "percent-encoding",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "walkdir",
+ "yaml-rust2",
 ]
 
 [[package]]
