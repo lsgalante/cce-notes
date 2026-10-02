@@ -26,6 +26,7 @@ mod tree;
 mod complete;
 mod mcp;
 mod panel;
+mod paste;
 mod side;
 
 use std::path::{Path, PathBuf};
@@ -930,6 +931,56 @@ impl NotesApp {
         let p = self.editor.buf.caret;
         let line = self.editor.buf.line(p.line);
         (p.line, line[..p.col.min(line.len())].chars().count())
+    }
+
+    /// Ctrl+V with a picture (or copied image files) on the clipboard: save
+    /// them in the vault's attachment folder for this note, as Obsidian
+    /// does, and embed them at the caret, each on its own line. False when
+    /// the clipboard holds nothing of the kind (the text paste runs).
+    fn paste_images(&mut self) -> bool {
+        let (Some(ix), Some(cur)) = (self.index.as_ref(), self.current.clone()) else { return false };
+        let Some(clip) = paste::read() else {
+            log::debug!("paste: nothing to attach, pasting text");
+            return false;
+        };
+        let root = ix.root().to_path_buf();
+        let folder = cce_vault::attachments::folder(&root, &cur);
+        let written = match paste::store(clip, &root.join(&folder), chrono::Local::now().naive_local()) {
+            Ok(w) => w,
+            Err(e) => {
+                self.set_status(format!("Could not save the pasted image: {e}"), true);
+                return true;
+            }
+        };
+        // The bare name, as Obsidian writes it — unless another file of that
+        // name would win the link, then the vault path. (The index learns of
+        // the new file from the watcher, after this.)
+        let embeds: Vec<String> = written
+            .iter()
+            .filter_map(|p| {
+                let rel = ix.rel(p)?;
+                let name = p.file_name()?.to_string_lossy().into_owned();
+                let link = if ix.resolve_text(Some(&cur), &name).is_some_and(|other| other != rel) { rel } else { name };
+                Some(format!("![[{link}]]"))
+            })
+            .collect();
+        if embeds.is_empty() {
+            return true;
+        }
+        let (a, b) = self.editor.buf.selection().unwrap_or((self.editor.buf.caret, self.editor.buf.caret));
+        let before = self.editor.buf.line(a.line)[..a.col].to_string();
+        let after = self.editor.buf.line(b.line)[b.col..].to_string();
+        let (text, at) = paste::insertion(&embeds, &before, &after);
+        let head = &text[..at];
+        let caret = match head.rfind('\n') {
+            Some(nl) => Pos::new(a.line + head.matches('\n').count(), head.len() - nl - 1),
+            None => Pos::new(a.line, a.col + head.len()),
+        };
+        self.editor.edit(a, b, &text, caret);
+        let n = written.len();
+        let place = if folder.is_empty() { "the vault".to_string() } else { folder };
+        self.set_status(format!("Pasted {n} image{} into {place}", if n == 1 { "" } else { "s" }), false);
+        true
     }
 
     /// Open, update or close the completion for the caret's position.
@@ -2140,6 +2191,12 @@ impl Application for NotesApp {
                     return None;
                 }
                 if self.completion_key(&event.logical_key) {
+                    return None;
+                }
+                // An image on the clipboard pastes as an attachment;
+                // anything else falls through to the editor's text paste.
+                if cce_ui::widget::match_key_shortcut(event, "ctrl+v") && self.paste_images() {
+                    self.update_completion();
                     return None;
                 }
                 self.editor.key(event);

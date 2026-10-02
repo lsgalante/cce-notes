@@ -26,6 +26,7 @@ proposal".
 | `complete.rs` | `[[` completion: the open link at the caret, the shortest link text, the splice |
 | `mcp.rs` | MCP tools (`search`, `find_notes`, `read_note`, `backlinks`, `open_note`, `append_daily`, `current_note`) |
 | `images.rs` | Embedded images: link text → vault path → decode thread → upload; the lookup the reading view and the editor share |
+| `paste.rs` | Ctrl+V of a picture or copied image files: what the clipboard offers, storing into the attachment folder, where the embeds go |
 | `instance.rs` | Single instance on `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock`; the CLI's commands |
 
 ## Behaviour worth knowing before changing it
@@ -97,6 +98,19 @@ sentence and note embeds (`![[Note]]`) still show as links.
   second and later renderer (`seen_renderer`). Verified with
   `CCE_UI_FAULT_RECONNECT` at scale 2 against a control built without it:
   the control's images went blank, these stayed.
+- **Pasting (Ctrl+V, `paste.rs`)**: a picture on the clipboard is saved
+  as `Pasted image <YYYYMMDDHHMMSS>.<ext>`, and copied image files under
+  their own names, in Obsidian's attachment folder for the note
+  (`cce_vault::attachments`); each `![[…]]` goes on its own line at the
+  caret. Copied files are checked first (a file manager offers their paths
+  as `text/plain` too); a picture is taken only when no `text/plain` is
+  offered, so text copied with an image rendering (browsers, office apps)
+  still pastes as text. The link is the bare name unless another file of
+  that name would win it. Shadow-test with `cce-shadow run wl-copy --type
+  image/png < x.png` — the shadow has its own clipboard.
+- **A line that is only an embed is its own block** in the parsed document
+  (`cce_vault::markdown`), even inside a paragraph, so reading view and
+  live preview agree on what draws as a picture.
 - Rasters over 2048 px are scaled down on decode (reported at their own
   size, so sizing is unchanged); SVGs show at their intrinsic size,
   rasterised at twice it. Formats: png, jpeg, gif (first frame), webp,
