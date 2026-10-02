@@ -149,6 +149,9 @@ fn try_forward(path: &str, cmd: &Command) -> bool {
     if stream.write_all(format!("{}\n", cmd.to_line()).as_bytes()).is_err() {
         return false;
     }
+    // Bounded: an instance whose listener is stuck must not hang this
+    // launch forever; unanswered, the launch is not forwarded.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).is_ok()
 }
@@ -163,18 +166,16 @@ pub fn spawn_listener(sender: calloop::channel::Sender<Message>) -> bool {
     std::thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(conn) = conn else { continue };
-            let mut reader = BufReader::new(conn);
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_err() {
+            let Some(line) = read_request_line(&conn, 64 * 1024, std::time::Duration::from_secs(2)) else {
                 continue;
-            }
+            };
             if line.trim() == "current" {
                 let cur = CURRENT.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let reply = match cur {
                     Some(p) => format!("ok {p}\n"),
                     None => "ok\n".to_string(),
                 };
-                let _ = reader.get_mut().write_all(reply.as_bytes());
+                let _ = (&conn).write_all(reply.as_bytes());
                 continue;
             }
             let reply: &[u8] = match Command::parse(line.trim()) {
@@ -186,7 +187,7 @@ pub fn spawn_listener(sender: calloop::channel::Sender<Message>) -> bool {
                 }
                 None => b"error unknown command\n",
             };
-            let _ = reader.get_mut().write_all(reply);
+            let _ = (&conn).write_all(reply);
         }
     });
     true
@@ -226,5 +227,82 @@ mod tests {
         assert!(Command::parse("bogus").is_none());
         // A note whose name is a number is a target, not a line.
         assert_eq!(Command::parse("open 2026"), Some(Command::Open { target: "2026".into(), line: None }));
+    }
+}
+
+/// One request line from a control-socket client, bounded in size and in
+/// TOTAL time. Until 2026-10-02 this was `BufReader::read_line` on a socket
+/// with no timeout at all, so a client that connected and said nothing (or trickled a
+/// byte at a time) held the listener thread for good, and every later
+/// `cce-notes open` forwarded to it waited behind. None on EOF before any byte, timeout,
+/// overflow or a read error.
+fn read_request_line(conn: &std::os::unix::net::UnixStream, limit: usize, deadline: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    let until = std::time::Instant::now() + deadline;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut reader = conn;
+    loop {
+        let left = until.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())?;
+        conn.set_read_timeout(Some(left)).ok()?;
+        let n = reader.read(&mut chunk).ok()?;
+        if n == 0 {
+            if buf.is_empty() {
+                return None;
+            }
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = buf.iter().position(|&b| b == b'\n') {
+            buf.truncate(end + 1);
+            break;
+        }
+        if buf.len() > limit {
+            return None;
+        }
+    }
+    let _ = conn.set_read_timeout(None);
+    String::from_utf8(buf).ok()
+}
+
+#[cfg(test)]
+mod request_line_tests {
+    use super::read_request_line;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_request_line_is_bounded_in_time_and_size() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(b"open note\nmore").unwrap();
+        assert_eq!(read_request_line(&server, 1024, Duration::from_secs(1)).as_deref(), Some("open note\n"));
+
+        // Silent: given up at the deadline, not held forever.
+        let (_quiet, server) = UnixStream::pair().unwrap();
+        let t = Instant::now();
+        assert_eq!(read_request_line(&server, 1024, Duration::from_millis(100)), None);
+        assert!(t.elapsed() < Duration::from_millis(500));
+
+        // Trickling a byte at a time: the TOTAL deadline still ends it.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..40 {
+                if client.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        });
+        let t = Instant::now();
+        assert_eq!(read_request_line(&server, 1024, Duration::from_millis(150)), None);
+        assert!(t.elapsed() < Duration::from_millis(500), "took {:?}", t.elapsed());
+        drop(server);
+        trickle.join().unwrap();
+
+        // Over the size cap.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(&[b'z'; 2000]).unwrap();
+        assert_eq!(read_request_line(&server, 1024, Duration::from_millis(200)), None);
     }
 }
