@@ -5,7 +5,7 @@ edition = "2021"
 description = "The vault's notes editor: Obsidian-compatible reading view, source editing and links over cce-vault"
 
 [dependencies]
-cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "14f32a24005785fe2c793367929765d290a7d401", features = ["markdown", "doc_editor"] }
+cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "ed5a688bc46a0a79d385ea56a9c0efcba5dee544", features = ["markdown", "doc_editor"] }
 cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "252827c1f6033514fbed46d1c7c1632241344fce" }
 calloop = "0.13.0"
 wayland-client = { version = "0.31", features = ["system"] }
