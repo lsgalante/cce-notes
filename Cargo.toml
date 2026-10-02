@@ -13,6 +13,10 @@ chrono = "0.4"
 log = "0.4"
 serde_json = "1"
 env_logger = "0.11"
+# Embedded images: rasters decoded off the UI thread; SVG through the
+# same resvg cce-ui draws icons with (its version, so one copy builds).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+resvg = "0.41.0"
 
 [dev-dependencies]
 tempfile = "3"

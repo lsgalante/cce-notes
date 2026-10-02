@@ -25,6 +25,7 @@ proposal".
 | `side.rs` | What the panes list: backlinks + unlinked mentions, outline, text and tag search |
 | `complete.rs` | `[[` completion: the open link at the caret, the shortest link text, the splice |
 | `mcp.rs` | MCP tools (`search`, `find_notes`, `read_note`, `backlinks`, `open_note`, `append_daily`, `current_note`) |
+| `images.rs` | Embedded images: link text → vault path → decode thread → upload; the lookup the reading view and the editor share |
 | `instance.rs` | Single instance on `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock`; the CLI's commands |
 
 ## Behaviour worth knowing before changing it
@@ -73,6 +74,34 @@ proposal".
   root and opens it in the editor, as Obsidian does. Ctrl state comes from `UiContext::ctrl_pressed` (the
   Wayland modifiers event) — a key event's own `ctrl` flag is stale for the
   Ctrl press itself.
+
+## Embedded images (`images.rs`)
+
+A paragraph that is one `![[pic.png]]` / `![](pic.png)` draws as the
+picture in reading and in live preview (cce-ui's `markdown::layout_with`
+and `DocEditor::set_images`; Obsidian's `|300` / `|300x200` sizes
+honoured, too-wide images scaled to the column). Inline embeds inside a
+sentence and note embeds (`![[Note]]`) still show as links.
+
+- **Asked for while painting, loaded after.** A lookup the cache cannot
+  answer is only recorded; `Images::pump`, at the end of `display_list`,
+  resolves it with `Index::resolve_text` from the open note and decodes on
+  a thread. The decode returns as `Message::ImageDecoded` (which wakes an
+  idle loop) and is uploaded there; then the reading layout and the
+  editor's line layouts are dropped so the link becomes the picture.
+- **A link that resolves to an image already decoded still needs a
+  relayout** — it drew as a link this frame. `pump` says so and the app
+  sends itself `Message::ImagesReady`. Without it, every vault change (all
+  links resolve afresh) turned loaded images back into links.
+- **Ids die with the renderer.** `renderer_init` forgets them all on the
+  second and later renderer (`seen_renderer`). Verified with
+  `CCE_UI_FAULT_RECONNECT` at scale 2 against a control built without it:
+  the control's images went blank, these stayed.
+- Rasters over 2048 px are scaled down on decode (reported at their own
+  size, so sizing is unchanged); SVGs show at their intrinsic size,
+  rasterised at twice it. Formats: png, jpeg, gif (first frame), webp,
+  bmp, svg — not avif. The 32 most recently drawn stay decoded across
+  notes.
 
 ## The reading view (`reading.rs`)
 
@@ -148,9 +177,9 @@ scale-1 shadow (1280×720) and pointer/caret maths at scale 2.
 
 In the editor: property values are edited as raw YAML (the table flips
 to raw when the caret enters; Obsidian edits in place), tables and
-callouts show raw, embeds (`![[…]]`) do not render,
-and a fenced block has no language label or copy button. Also heading
+callouts show raw, note embeds (`![[Note]]`) and embeds inside a sentence
+show as links (standalone image embeds render), and a fenced block has no language label or copy button. Also heading
 completion (`[[Note#`), rendered snippets in the panes (they show
 raw lines), search debounce for large vaults (it scans every note per
-keystroke), embedded images, the icon (`Icon=cce-notes` has no SVG in
+keystroke), the icon (`Icon=cce-notes` has no SVG in
 cce-icons yet), and per-note scroll in the history.

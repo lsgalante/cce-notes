@@ -19,6 +19,7 @@
 //! `vault { path "…" }` in `~/.config/cce/config.kdl`. The app runs single
 //! instance (see [`instance`]); `cce-notes <note>` opens a note in it.
 
+mod images;
 mod instance;
 mod reading;
 mod tree;
@@ -79,6 +80,10 @@ pub enum Message {
     Command(Command),
     VaultChanged(Vec<PathBuf>),
     Mcp(cce_ui::mcp::McpToolCall),
+    /// An embedded image finished decoding (vault path, pixels or failure).
+    ImageDecoded(String, Option<images::Decoded>),
+    /// Links resolved to images already decoded: lay out again.
+    ImagesReady,
     Exit,
 }
 
@@ -212,6 +217,12 @@ struct NotesApp {
     hover_hit: bool,
 
     editor: DocEditor,
+    /// Embedded images, shared with the editor (see `images.rs`).
+    images: images::Images,
+    sender: calloop::channel::Sender<Message>,
+    /// A renderer has been made before: the next one is a reconnect, and
+    /// every image id died with the old one.
+    seen_renderer: bool,
     /// The editor's revision when its text last matched the disk.
     saved_rev: u64,
     /// The revision as last seen by the autosave check, and when it changed.
@@ -348,6 +359,7 @@ impl NotesApp {
 
     /// Show `text` as the current note's content, as on disk.
     fn load_text(&mut self, text: String) {
+        self.images.note_changed();
         self.blocks = cce_vault::markdown::blocks(&text);
         // Clears the undo history too: undo must not step back into another
         // note's (or the pre-reload) text.
@@ -595,6 +607,13 @@ impl NotesApp {
     fn vault_changed(&mut self, paths: Vec<PathBuf>) {
         let Some(ix) = self.index.as_mut() else { return };
         ix.apply_changes(&paths);
+        // An image added, changed or removed: links resolve again, and the
+        // editor asks again (it only asks while laying a line out).
+        let images_touched = paths.iter().any(|p| cce_vault::markdown::is_image(&p.to_string_lossy()));
+        self.images.vault_changed(ix, &paths);
+        if images_touched {
+            self.editor.invalidate();
+        }
         self.rebuild_rows();
         // Link colours, backlinks and search hits depend on every file.
         self.layout = None;
@@ -1013,7 +1032,8 @@ impl NotesApp {
             }
             _ => true,
         };
-        let laid = reading::layout(&self.blocks, width, &self.theme, m, &resolved);
+        let images = &self.images;
+        let laid = reading::layout_with(&self.blocks, width, &self.theme, m, &resolved, &|t| images.lookup(t));
         self.layout = Some((width, laid));
     }
 
@@ -1277,7 +1297,8 @@ impl NotesApp {
                 }
                 let note = m.note;
                 if let Some((_, l)) = &self.layout {
-                    pc.clip(note, |pc| l.paint(pc, (ox, oy), self.read_scroll, note));
+                    let images = &self.images;
+                    pc.clip(note, |pc| l.paint_with(pc, (ox, oy), self.read_scroll, note, &|t| images.lookup(t)));
                 }
             }
         }
@@ -1456,7 +1477,10 @@ impl Application for NotesApp {
         }
         let _ = sender.send(Message::Command(startup.command.clone()));
 
+        let images = images::Images::default();
         let mut editor = DocEditor::new("", EditorTheme::new(READ_SIZE), true);
+        let shared = images.clone();
+        editor.set_images(Box::new(move |t| shared.lookup(t)));
         editor.max_width = READ_MAX_W;
         editor.pad = READ_PAD;
         let switcher_input = TextBox::new(String::new()).with_placeholder("Find or create a note…");
@@ -1487,6 +1511,9 @@ impl Application for NotesApp {
             saved_rev: editor.buf.revision,
             edit_seen: editor.buf.revision,
             editor,
+            images,
+            sender: sender.clone(),
+            seen_renderer: false,
             edit_changed_at: Instant::now(),
             history: Vec::new(),
             hist_pos: 0,
@@ -1533,6 +1560,16 @@ impl Application for NotesApp {
             Message::Command(cmd) => self.run_command(cmd),
             Message::VaultChanged(paths) => self.vault_changed(paths),
             Message::Mcp(call) => self.mcp_call(call),
+            Message::ImageDecoded(path, decoded) => {
+                if self.images.decoded(path, decoded) {
+                    self.layout = None;
+                    self.editor.invalidate();
+                }
+            }
+            Message::ImagesReady => {
+                self.layout = None;
+                self.editor.invalidate();
+            }
             Message::Exit => *_exit = true,
         }
         *needs_rebuild = true;
@@ -1631,11 +1668,34 @@ impl Application for NotesApp {
         }
         self.paint_status(&mut pc);
         self.paint_switcher(&mut pc);
+        // What this frame asked for and nobody has: resolve and decode it.
+        if let Some(ix) = &self.index {
+            let tx = self.sender.clone();
+            let ready = self.images.pump(ix, self.current.as_deref(), move |path, d| {
+                let _ = tx.send(Message::ImageDecoded(path, d));
+            });
+            if ready {
+                // Through the loop, so a frame follows.
+                let _ = self.sender.send(Message::ImagesReady);
+            }
+        }
         Some(pc.finish())
     }
 
     fn display_list_text(&self) -> bool {
         true
+    }
+
+    /// A reconnect builds a new renderer and every uploaded image id dies
+    /// with the old one: forget them, and the next frame uploads afresh.
+    /// The first renderer needs nothing (uploads queued before it drain
+    /// into it).
+    fn renderer_init(&mut self, _renderer: &mut cce_ui::vk::VkRenderer) {
+        if std::mem::replace(&mut self.seen_renderer, true) {
+            self.images.renderer_reset();
+            self.layout = None;
+            self.editor.invalidate();
+        }
     }
 
     /// Ctrl+Z reaches the editor through here: the runner routes the undo
