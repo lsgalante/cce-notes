@@ -27,7 +27,7 @@ proposal".
 | `mcp.rs` | MCP tools (`search`, `find_notes`, `read_note`, `backlinks`, `open_note`, `append_daily`, `current_note`) |
 | `images.rs` | Embedded images: link text → vault path → decode thread → upload; the lookup the reading view and the editor share |
 | `paste.rs` | Ctrl+V and drops of a picture or image files: what the clipboard / drop offers, storing into the attachment folder, where the embeds go |
-| `instance.rs` | Single instance on `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock`; the CLI's commands |
+| `instance.rs` | The CLI's commands, on the single-instance socket `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock` (claim, forward and listener are `cce_ui::ipc::instance`) |
 
 ## Behaviour worth knowing before changing it
 
