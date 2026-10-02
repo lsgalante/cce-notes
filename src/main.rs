@@ -938,18 +938,30 @@ impl NotesApp {
     /// does, and embed them at the caret, each on its own line. False when
     /// the clipboard holds nothing of the kind (the text paste runs).
     fn paste_images(&mut self) -> bool {
-        let (Some(ix), Some(cur)) = (self.index.as_ref(), self.current.clone()) else { return false };
+        if self.index.is_none() || self.current.is_none() {
+            return false;
+        }
         let Some(clip) = paste::read() else {
             log::debug!("paste: nothing to attach, pasting text");
             return false;
         };
+        let (a, b) = self.editor.buf.selection().unwrap_or((self.editor.buf.caret, self.editor.buf.caret));
+        self.attach(clip, a, b, "Pasted");
+        true
+    }
+
+    /// Store `clip` in the attachment folder for the open note and put an
+    /// embed for each file in place of `a..b`, each on its own line.
+    /// `verb` names the action in the status line.
+    fn attach(&mut self, clip: paste::Clip, a: Pos, b: Pos, verb: &str) {
+        let (Some(ix), Some(cur)) = (self.index.as_ref(), self.current.clone()) else { return };
         let root = ix.root().to_path_buf();
         let folder = cce_vault::attachments::folder(&root, &cur);
         let written = match paste::store(clip, &root.join(&folder), chrono::Local::now().naive_local()) {
             Ok(w) => w,
             Err(e) => {
-                self.set_status(format!("Could not save the pasted image: {e}"), true);
-                return true;
+                self.set_status(format!("Could not save the image: {e}"), true);
+                return;
             }
         };
         // The bare name, as Obsidian writes it — unless another file of that
@@ -965,9 +977,8 @@ impl NotesApp {
             })
             .collect();
         if embeds.is_empty() {
-            return true;
+            return;
         }
-        let (a, b) = self.editor.buf.selection().unwrap_or((self.editor.buf.caret, self.editor.buf.caret));
         let before = self.editor.buf.line(a.line)[..a.col].to_string();
         let after = self.editor.buf.line(b.line)[b.col..].to_string();
         let (text, at) = paste::insertion(&embeds, &before, &after);
@@ -979,8 +990,33 @@ impl NotesApp {
         self.editor.edit(a, b, &text, caret);
         let n = written.len();
         let place = if folder.is_empty() { "the vault".to_string() } else { folder };
-        self.set_status(format!("Pasted {n} image{} into {place}", if n == 1 { "" } else { "s" }), false);
-        true
+        self.set_status(format!("{verb} {n} image{} into {place}", if n == 1 { "" } else { "s" }), false);
+    }
+
+    /// A drop on the window: images (pixels from a browser, or image files
+    /// from a file manager) become attachments embedded after the line they
+    /// were dropped on. In reading view the note switches to editing and they go at
+    /// its end.
+    fn dropped(&mut self, mime: &str, data: &[u8], x: f32, y: f32) {
+        if self.index.is_none() || self.current.is_none() {
+            self.set_status("Open a note to drop images into it", true);
+            return;
+        }
+        let Some(clip) = paste::from_drop(mime, data) else {
+            self.set_status("Only images can be dropped into a note", true);
+            return;
+        };
+        let at = if self.mode == Mode::Source && contains(self.editor_rect(&self.metrics()), x, y) {
+            // After the line under the pointer: dropping onto a word must
+            // not split it around the picture.
+            let line = self.editor.pos_at(x, y).line;
+            Pos::new(line, self.editor.buf.line(line).len())
+        } else {
+            self.set_mode(Mode::Source);
+            let last = self.editor.buf.line_count() - 1;
+            Pos::new(last, self.editor.buf.line(last).len())
+        };
+        self.attach(clip, at, at, "Dropped");
     }
 
     /// Open, update or close the completion for the caret's position.
@@ -1735,6 +1771,17 @@ impl Application for NotesApp {
 
     fn display_list_text(&self) -> bool {
         true
+    }
+
+    /// Pixels first (a browser's dragged picture); a file manager's drag
+    /// offers only the file list.
+    fn drop_mimes(&self) -> &'static [&'static str] {
+        paste::DROP_MIMES
+    }
+
+    fn handle_drop(&mut self, mime: &str, data: &[u8], pos: LogicalPosition, needs_rebuild: &mut bool) {
+        self.dropped(mime, data, pos.x as f32, pos.y as f32);
+        *needs_rebuild = true;
     }
 
     /// A reconnect builds a new renderer and every uploaded image id dies

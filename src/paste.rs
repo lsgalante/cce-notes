@@ -1,4 +1,4 @@
-//! Pasting images (Ctrl+V in the editor), as Obsidian does: a picture on
+//! Pasting and dropping images, as Obsidian does: a picture on
 //! the clipboard — a screenshot, an image copied in a browser — or image
 //! files copied in a file manager become files in the vault's attachment
 //! folder (`cce_vault::attachments`, Obsidian's own setting) and `![[…]]`
@@ -19,6 +19,22 @@ pub enum Clip {
     Image { bytes: Vec<u8>, ext: &'static str },
     /// Image files copied in a file manager.
     Files(Vec<PathBuf>),
+}
+
+/// What a drop takes, best first: a browser's dragged picture as pixels,
+/// else the file list a file manager's drag carries.
+pub const DROP_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "text/uri-list"];
+
+/// What a drop of `data` as `mime` attaches, if anything.
+pub fn from_drop(mime: &str, data: &[u8]) -> Option<Clip> {
+    if let Some((_, ext)) = IMAGE_TYPES.iter().find(|(m, _)| *m == mime) {
+        return (!data.is_empty()).then(|| Clip::Image { bytes: data.to_vec(), ext });
+    }
+    if mime == "text/uri-list" {
+        let files = image_files(&String::from_utf8_lossy(data));
+        return (!files.is_empty()).then_some(Clip::Files(files));
+    }
+    None
 }
 
 /// What on the clipboard a paste should turn into attachments, if anything.
@@ -139,6 +155,19 @@ mod tests {
             dir.path().display()
         );
         assert_eq!(image_files(&list), vec![a]);
+    }
+
+    #[test]
+    fn drops_take_pixels_or_image_files() {
+        assert_eq!(from_drop("image/jpeg", b"jpg"), Some(Clip::Image { bytes: b"jpg".to_vec(), ext: "jpg" }));
+        assert_eq!(from_drop("image/png", b""), None);
+        assert_eq!(from_drop("text/uri-list", b"https://x.y/a.png\r\n"), None);
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.webp");
+        std::fs::write(&a, b"x").unwrap();
+        let list = format!("file://{}\r\n", a.display());
+        assert_eq!(from_drop("text/uri-list", list.as_bytes()), Some(Clip::Files(vec![a])));
+        assert_eq!(from_drop("text/html", b"<img>"), None);
     }
 
     #[test]

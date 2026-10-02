@@ -26,7 +26,7 @@ proposal".
 | `complete.rs` | `[[` completion: the open link at the caret, the shortest link text, the splice |
 | `mcp.rs` | MCP tools (`search`, `find_notes`, `read_note`, `backlinks`, `open_note`, `append_daily`, `current_note`) |
 | `images.rs` | Embedded images: link text → vault path → decode thread → upload; the lookup the reading view and the editor share |
-| `paste.rs` | Ctrl+V of a picture or copied image files: what the clipboard offers, storing into the attachment folder, where the embeds go |
+| `paste.rs` | Ctrl+V and drops of a picture or image files: what the clipboard / drop offers, storing into the attachment folder, where the embeds go |
 | `instance.rs` | Single instance on `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock`; the CLI's commands |
 
 ## Behaviour worth knowing before changing it
@@ -108,6 +108,14 @@ sentence and note embeds (`![[Note]]`) still show as links.
   still pastes as text. The link is the bare name unless another file of
   that name would win it. Shadow-test with `cce-shadow run wl-copy --type
   image/png < x.png` — the shadow has its own clipboard.
+- **Dropping** (`drop_mimes` / `handle_drop`) takes the same two kinds,
+  pixels first (`image/png`… — a browser's dragged picture), then
+  `text/uri-list` (a file manager). The embed goes after the line under
+  the pointer, never mid-line; a drop on reading view switches to editing
+  and adds it at the end. Shadow-test with a GTK4 drag source and
+  `ccectl pointer-press` / `pointer-move-to` / `pointer-release`; offer
+  pixels with `Gdk.ContentProvider.new_for_bytes("image/png", …)` — a
+  texture `new_for_value` from Python advertises only GTK's private type.
 - **A line that is only an embed is its own block** in the parsed document
   (`cce_vault::markdown`), even inside a paragraph, so reading view and
   live preview agree on what draws as a picture.
