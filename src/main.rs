@@ -1006,7 +1006,7 @@ impl NotesApp {
             self.set_status("Only images can be dropped into a note", true);
             return;
         };
-        let at = if self.mode == Mode::Source && contains(self.editor_rect(&self.metrics()), x, y) {
+        let at = if self.mode == Mode::Source && self.editor_rect(&self.metrics()).contains(x, y) {
             // After the line under the pointer: dropping onto a word must
             // not split it around the picture.
             let line = self.editor.pos_at(x, y).line;
@@ -1097,7 +1097,7 @@ impl NotesApp {
 
     fn completion_row_at(&mut self, m: &Metrics, x: f32, y: f32) -> Option<usize> {
         let r = self.completion_rect(m)?;
-        if !contains(r, x, y) {
+        if !r.contains(x, y) {
             return None;
         }
         let i = ((y - r.y - 4.0) / COMPLETE_ROW_H).floor();
@@ -1134,7 +1134,7 @@ impl NotesApp {
     }
 
     fn tree_row_at(&self, m: &Metrics, x: f32, y: f32) -> Option<usize> {
-        if self.left_tab != LeftTab::Files || !contains(m.tree_body, x, y) {
+        if self.left_tab != LeftTab::Files || !m.tree_body.contains(x, y) {
             return None;
         }
         let i = ((y - m.tree_body.y - 4.0 + self.tree_scroll) / TREE_ROW_H).floor();
@@ -1144,7 +1144,7 @@ impl NotesApp {
     /// The reading view's click target under a window point.
     fn reading_hit(&self, x: f32, y: f32) -> Option<Hit> {
         let m = self.metrics();
-        if self.mode != Mode::Reading || self.switcher.is_some() || !contains(m.note, x, y) {
+        if self.mode != Mode::Reading || self.switcher.is_some() || !m.note.contains(x, y) {
             return None;
         }
         let (ox, oy, _) = self.reading_frame(&m);
@@ -1495,7 +1495,7 @@ fn paint_tabs(pc: &mut PaintCtx, r: Rect, labels: &[&str], active: usize) {
 }
 
 fn tab_at(r: Rect, n: usize, x: f32, y: f32) -> Option<usize> {
-    if r.width <= 0.0 || !contains(r, x, y) {
+    if r.width <= 0.0 || !r.contains(x, y) {
         return None;
     }
     Some((((x - r.x) / (r.width / n as f32)) as usize).min(n - 1))
@@ -1516,9 +1516,6 @@ fn rename_target(from: &str, query: &str) -> Option<String> {
     }
 }
 
-fn contains(r: Rect, x: f32, y: f32) -> bool {
-    x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height
-}
 
 use side::plural;
 
@@ -1828,7 +1825,7 @@ impl Application for NotesApp {
 
     fn cursor_icon(&self, x: f32, y: f32) -> Option<CursorIcon> {
         let m = self.metrics();
-        let over_title = self.current.is_some() && self.switcher.is_none() && contains(m.title, x, y);
+        let over_title = self.current.is_some() && self.switcher.is_none() && m.title.contains(x, y);
         if self.hover_hit
             || self.tree_hover.is_some()
             || self.search_panel.hover.is_some()
@@ -1837,10 +1834,10 @@ impl Application for NotesApp {
         {
             return Some(CursorIcon::Pointer);
         }
-        if self.left_tab == LeftTab::Search && contains(m.search_box, x, y) {
+        if self.left_tab == LeftTab::Search && m.search_box.contains(x, y) {
             return Some(CursorIcon::Text);
         }
-        (self.mode == Mode::Source && self.switcher.is_none() && contains(self.editor_rect(&m), x, y))
+        (self.mode == Mode::Source && self.switcher.is_none() && self.editor_rect(&m).contains(x, y))
             .then_some(CursorIcon::Text)
     }
 
@@ -1890,7 +1887,7 @@ impl Application for NotesApp {
                     self.update_completion();
                     *needs_rebuild = true;
                 }
-            } else if contains(m.note, x, y) {
+            } else if m.note.contains(x, y) {
                 hit = self.editor.link_at(x, y);
             }
         }
@@ -1921,7 +1918,7 @@ impl Application for NotesApp {
                     self.switcher_pick(false);
                     return None;
                 }
-                if !contains(self.switcher_rect(), x, y) {
+                if !self.switcher_rect().contains(x, y) {
                     self.close_switcher();
                     return None;
                 }
@@ -1932,7 +1929,7 @@ impl Application for NotesApp {
 
         let m = self.metrics();
         // The search box keeps the keyboard only while it is clicked into.
-        let in_search = self.left_tab == LeftTab::Search && contains(m.search_box, x, y);
+        let in_search = self.left_tab == LeftTab::Search && m.search_box.contains(x, y);
         if pressed && !in_search && self.search_input.editing {
             self.search_input.unfocus();
         }
@@ -1971,12 +1968,12 @@ impl Application for NotesApp {
                 self.run_action(a);
                 return None;
             }
-            if self.current.is_some() && contains(m.title, x, y) {
+            if self.current.is_some() && m.title.contains(x, y) {
                 self.open_rename();
                 return None;
             }
         }
-        if pressed && contains(m.mode_chip, x, y) && self.current.is_some() {
+        if pressed && m.mode_chip.contains(x, y) && self.current.is_some() {
             let next = if self.mode == Mode::Reading { Mode::Source } else { Mode::Reading };
             self.set_mode(next);
             return None;
@@ -2018,7 +2015,7 @@ impl Application for NotesApp {
         if self.mode == Mode::Source && button == MouseButton::Left {
             if state == ElementState::Released {
                 self.editor.release();
-            } else if contains(self.editor_rect(&m), x, y) {
+            } else if self.editor_rect(&m).contains(x, y) {
                 let (shift, ctrl) = (self.ui_context.shift_pressed, self.ui_context.ctrl_pressed);
                 match self.editor.press(x, y, shift, ctrl) {
                     doc_editor::Response::Follow(target) => {
@@ -2043,19 +2040,19 @@ impl Application for NotesApp {
             return;
         }
         let m = self.metrics();
-        if contains(m.side_body, x, y) {
+        if m.side_body.contains(x, y) {
             if self.side_panel.wheel(delta, m.side_body) {
                 *needs_rebuild = true;
             }
             return;
         }
-        if self.left_tab == LeftTab::Search && contains(m.tree_body, x, y) {
+        if self.left_tab == LeftTab::Search && m.tree_body.contains(x, y) {
             if self.search_panel.wheel(delta, m.tree_body) {
                 *needs_rebuild = true;
             }
             return;
         }
-        if contains(m.tree_body, x, y) && self.left_tab == LeftTab::Files {
+        if m.tree_body.contains(x, y) && self.left_tab == LeftTab::Files {
             let max = self.tree_max_scroll(&m);
             self.tree_motion.reconcile(0.0, self.tree_scroll);
             if self.tree_motion.apply(delta, (TREE_ROW_H, TREE_ROW_H), Bounds::max(0.0), Bounds::max(max)) {
@@ -2064,7 +2061,7 @@ impl Application for NotesApp {
             }
             return;
         }
-        if !contains(m.note, x, y) {
+        if !m.note.contains(x, y) {
             return;
         }
         match self.mode {
