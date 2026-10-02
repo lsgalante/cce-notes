@@ -164,7 +164,11 @@ today, which a long note can churn).
 cce-notes [--vault <dir>] [open] <note>[#heading] [line]   # line is 1-based
 cce-notes daily [YYYY-MM-DD]
 cce-notes search <query>         # the search pane holding it (#tag works)
+cce-notes [show]                 # just bring the instance up
 ```
+
+`daily`, `search` and `show` are verbs, not note names: a note called one
+of them opens with an explicit `open` (`cce-notes open show`).
 
 A second launch forwards its command to the running instance and exits.
 Keys come from input.kdl's `cce-notes` domain: `quick_switcher` (ctrl+o),

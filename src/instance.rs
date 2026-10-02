@@ -43,11 +43,13 @@ pub enum Command {
 impl Command {
     /// The command line's own arguments as a socket command:
     /// `cce-notes [open] <path> [line]`, `cce-notes daily [date]`,
-    /// `cce-notes search <query…>`, or nothing.
+    /// `cce-notes search <query…>`, `cce-notes show`, or nothing (also
+    /// `show`). The verbs are reserved, as `daily` and `search` always were:
+    /// a note named `show` opens with `cce-notes open show`.
     pub fn from_args(args: &[String]) -> Result<Command, String> {
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         match words.as_slice() {
-            [] => Ok(Command::Show),
+            [] | ["show"] => Ok(Command::Show),
             ["daily"] => Ok(Command::Daily(None)),
             ["daily", d] => parse_date(d).map(|d| Command::Daily(Some(d))),
             ["search", rest @ ..] => Ok(Command::Search(rest.join(" "))),
@@ -56,7 +58,7 @@ impl Command {
                 let line = line.parse::<usize>().map_err(|_| format!("not a line number: {line}"))?;
                 Ok(Command::Open { target: absolute(target), line: Some(line) })
             }
-            _ => Err("usage: cce-notes [open] <note> [line] | daily [YYYY-MM-DD] | search <query>".into()),
+            _ => Err("usage: cce-notes [open] <note> [line] | daily [YYYY-MM-DD] | search <query> | show".into()),
         }
     }
 
@@ -162,6 +164,8 @@ mod tests {
     fn args_and_lines_round_trip() {
         let cases = [
             (vec![], Command::Show),
+            (vec!["show"], Command::Show),
+            (vec!["open", "show"], Command::Open { target: "show".into(), line: None }),
             (vec!["Note"], Command::Open { target: "Note".into(), line: None }),
             (vec!["open", "My Note#Sec", "12"], Command::Open { target: "My Note#Sec".into(), line: Some(12) }),
             (vec!["daily"], Command::Daily(None)),
