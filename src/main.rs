@@ -170,9 +170,11 @@ struct Completion {
 }
 
 /// One quick-switcher result: an existing note, or "create this".
+/// `alias` is the name the query matched when that is not the note's own
+/// (an alias): the row shows the path, an `arrow-left` glyph, then it.
 #[derive(Clone, Debug)]
 enum Choice {
-    Note { path: String, shown: String },
+    Note { path: String, alias: Option<String> },
     Create(String),
 }
 
@@ -721,7 +723,7 @@ impl NotesApp {
             }
             out.into_iter()
                 .take(SWITCHER_ROWS)
-                .map(|p| Choice::Note { shown: p.clone(), path: p })
+                .map(|p| Choice::Note { path: p, alias: None })
                 .collect()
         } else {
             let mut c: Vec<Choice> = ix
@@ -729,12 +731,8 @@ impl NotesApp {
                 .into_iter()
                 .filter(|m| ix.entry(&m.path).is_some_and(|e| e.kind == FileKind::Note))
                 .map(|m| {
-                    let shown = if m.path.trim_end_matches(".md").ends_with(m.matched.as_str()) {
-                        m.path.clone()
-                    } else {
-                        format!("{}  ← {}", m.path, m.matched)
-                    };
-                    Choice::Note { path: m.path, shown }
+                    let alias = (!m.path.trim_end_matches(".md").ends_with(m.matched.as_str())).then_some(m.matched);
+                    Choice::Note { path: m.path, alias }
                 })
                 .collect();
             if ix.lookup(&query).is_none() {
@@ -1173,11 +1171,19 @@ impl NotesApp {
                     None => (String::new(), cur.as_str()),
                 };
                 let name = file.strip_suffix(".md").unwrap_or(file);
-                let dirty = if self.dirty() { " •" } else { "" };
                 let bounds = Some([inset, 0.0, right, BAND_H]);
                 let dir_w = dir.chars().count() as f32 * size * 0.6;
+                let name_w = name.chars().count() as f32 * size * 0.6;
                 pc.text_with(dir, inset, ty, size, srgb_u8(DIM), Some(family.clone()), bounds);
-                pc.text_with(format!("{name}{dirty}"), inset + dir_w, ty, size, srgb_u8(FG), Some(family.clone()), bounds);
+                pc.text_with(name.to_string(), inset + dir_w, ty, size, srgb_u8(FG), Some(family.clone()), bounds);
+                if self.dirty() {
+                    // Unsaved: a small dot after the name.
+                    let side = (size * 0.45).round().max(4.0);
+                    let dot = Rect { x: inset + dir_w + name_w + size * 0.5, y: (BAND_H - side) / 2.0, width: side, height: side };
+                    if dot.x + dot.width <= right {
+                        pc.icon("circle", dot, cce_ui::colors::to_srgb(FG));
+                    }
+                }
             }
             None => {
                 let vault = self.index.as_ref().map(|ix| vault_name(ix.root())).unwrap_or_else(|| "Notes".into());
@@ -1282,14 +1288,20 @@ impl NotesApp {
                 }
                 let x = r.x + 8.0 + row.depth as f32 * 14.0;
                 let ty = cce_ui::layout::align_text_y(r.y, r.height, size, 0.0);
-                let (label, color) = if row.folder {
-                    (format!("{} {}", if row.open { "▾" } else { "▸" }, row.name), DIM)
+                // A folder's disclosure chevron sits in the gutter every
+                // row's name is indented past, so files line up with it.
+                let gutter = (size * 1.2).round();
+                let color = if row.folder {
+                    let side = (size * 0.9).round();
+                    let chevron = Rect { x, y: r.y + (r.height - side) / 2.0, width: side, height: side };
+                    pc.icon(if row.open { "chevron-down" } else { "chevron-right" }, chevron, cce_ui::colors::to_srgb(DIM));
+                    DIM
                 } else {
-                    (format!("  {}", row.name), FG)
+                    FG
                 };
                 pc.text_with(
-                    label,
-                    x,
+                    row.name.clone(),
+                    x + gutter,
                     ty,
                     size,
                     srgb_u8(color),
@@ -1403,19 +1415,26 @@ impl NotesApp {
             if i == sw.selected {
                 pc.rounded_rect(row, 5.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_HOVER);
             }
-            let (label, color) = match c {
-                Choice::Note { shown, .. } => (shown.trim_end_matches(".md").to_string(), FG),
-                Choice::Create(name) => (format!("Create “{name}”"), DIM),
+            let (label, color, alias) = match c {
+                Choice::Note { path, alias } => (path.trim_end_matches(".md").to_string(), FG, alias.as_deref()),
+                Choice::Create(name) => (format!("Create “{name}”"), DIM, None),
             };
-            pc.text_with(
-                label,
-                row.x + 10.0,
-                cce_ui::layout::align_text_y(row.y, row.height, size, 0.0),
-                size,
-                srgb_u8(color),
-                Some(family.clone()),
-                Some([row.x, row.y, row.x + row.width - 6.0, row.y + row.height]),
-            );
+            let ty = cce_ui::layout::align_text_y(row.y, row.height, size, 0.0);
+            let bounds = Some([row.x, row.y, row.x + row.width - 6.0, row.y + row.height]);
+            let lw = label.chars().count() as f32 * size * 0.6;
+            pc.text_with(label, row.x + 10.0, ty, size, srgb_u8(color), Some(family.clone()), bounds);
+            if let Some(alias) = alias {
+                // "path ← alias": the alias the query matched, behind an
+                // arrow glyph pointing back at the note it names.
+                let side = (size * 0.9).round();
+                let ax = row.x + 10.0 + lw + size * 0.6;
+                let arrow = Rect { x: ax, y: row.y + (row.height - side) / 2.0, width: side, height: side };
+                if arrow.x + arrow.width < row.x + row.width - 6.0 {
+                    pc.icon("arrow-left", arrow, cce_ui::colors::to_srgb(DIM));
+                }
+                let tx = ax + side + size * 0.4;
+                pc.text_with(alias.to_string(), tx, ty, size, srgb_u8(DIM), Some(family.clone()), bounds);
+            }
         }
         if let Some((hint, err)) = &sw.hint {
             let y = top + sw.choices.len() as f32 * SWITCHER_ROW_H;
