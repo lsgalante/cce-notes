@@ -63,8 +63,6 @@ const SWITCHER_ROWS: usize = 10;
 const SIDE_W: f32 = 260.0;
 /// The note pane's narrowest before the side pane gives way to it.
 const NOTE_MIN_W: f32 = 360.0;
-const TAB_H: f32 = 30.0;
-const SEARCH_H: f32 = 30.0;
 const COMPLETE_W: f32 = 320.0;
 const COMPLETE_ROW_H: f32 = 24.0;
 /// Editing saves once typing has paused this long.
@@ -297,12 +295,16 @@ impl NotesApp {
             0.0
         };
         let inset = cce_ui::layout::root_plate_inset();
+        // The tab strips, mode chip and search box at the toolkit's control height.
+        let tab_h = cce_ui::layout::button_height();
+        let search_h = cce_ui::layout::textbox_height();
+        let chip_h = cce_ui::layout::button_height();
         let tree = Rect { x: 0.0, y: BAND_H, width: tree_w, height: body_h };
-        let left_tabs = Rect { x: 0.0, y: BAND_H, width: tree_w, height: TAB_H };
-        let search_box = Rect { x: 8.0, y: BAND_H + TAB_H + 4.0, width: (tree_w - 16.0).max(0.0), height: SEARCH_H };
-        let body_top = if self.left_tab == LeftTab::Search { search_box.y + SEARCH_H + 4.0 } else { BAND_H + TAB_H };
+        let left_tabs = Rect { x: 0.0, y: BAND_H, width: tree_w, height: tab_h };
+        let search_box = Rect { x: 8.0, y: BAND_H + tab_h + 4.0, width: (tree_w - 16.0).max(0.0), height: search_h };
+        let body_top = if self.left_tab == LeftTab::Search { search_box.y + search_h + 4.0 } else { BAND_H + tab_h };
         let side = Rect { x: w - side_w, y: BAND_H, width: side_w, height: body_h };
-        let mode_chip = Rect { x: w - inset - 84.0, y: (BAND_H - 24.0) / 2.0, width: 84.0, height: 24.0 };
+        let mode_chip = Rect { x: w - inset - 84.0, y: (BAND_H - chip_h) / 2.0, width: 84.0, height: chip_h };
         Metrics {
             tree,
             left_tabs,
@@ -310,8 +312,8 @@ impl NotesApp {
             tree_body: Rect { x: 0.0, y: body_top, width: tree_w, height: (BAND_H + body_h - body_top).max(0.0) },
             note: Rect { x: tree_w, y: BAND_H, width: w - tree_w - side_w, height: body_h },
             side,
-            side_tabs: Rect { x: side.x, y: BAND_H, width: side_w, height: TAB_H },
-            side_body: Rect { x: side.x, y: BAND_H + TAB_H, width: side_w, height: (body_h - TAB_H).max(0.0) },
+            side_tabs: Rect { x: side.x, y: BAND_H, width: side_w, height: tab_h },
+            side_body: Rect { x: side.x, y: BAND_H + tab_h, width: side_w, height: (body_h - tab_h).max(0.0) },
             title: Rect { x: inset, y: 0.0, width: (mode_chip.x - 12.0 - inset).max(0.0), height: BAND_H },
             mode_chip,
         }
@@ -778,13 +780,13 @@ impl NotesApp {
             x: (self.width as f32 - w) / 2.0,
             y: BAND_H + 24.0,
             width: w,
-            height: 12.0 + 32.0 + 8.0 + n as f32 * SWITCHER_ROW_H + 6.0,
+            height: switcher_rows_top() + n as f32 * SWITCHER_ROW_H + 6.0,
         }
     }
 
     fn switcher_row_at(&self, x: f32, y: f32) -> Option<usize> {
         let r = self.switcher_rect();
-        let top = r.y + 12.0 + 32.0 + 8.0;
+        let top = r.y + switcher_rows_top();
         if x < r.x || x > r.x + r.width || y < top {
             return None;
         }
@@ -1409,7 +1411,7 @@ impl NotesApp {
         pc.rounded_rect(r, 10.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_BG);
         cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.switcher_input, pc);
         let (family, size) = cce_ui::layout::list_font_parsed();
-        let top = r.y + 12.0 + 32.0 + 8.0;
+        let top = r.y + switcher_rows_top();
         for (i, c) in sw.choices.iter().enumerate() {
             let row = Rect { x: r.x + 6.0, y: top + i as f32 * SWITCHER_ROW_H, width: r.width - 12.0, height: SWITCHER_ROW_H };
             if i == sw.selected {
@@ -1511,6 +1513,12 @@ fn paint_tabs(pc: &mut PaintCtx, r: Rect, labels: &[&str], active: usize) {
             pc.rounded_rect(u, 1.0, (true, true, true, true), cce_ui::colors::to_linear([0.66, 0.55, 0.98, 1.0]));
         }
     }
+}
+
+/// The switcher's choice rows start under its input: a 12px inset, the
+/// textbox, an 8px gap.
+fn switcher_rows_top() -> f32 {
+    12.0 + cce_ui::layout::textbox_height() + 8.0
 }
 
 fn tab_at(r: Rect, n: usize, x: f32, y: f32) -> Option<usize> {
@@ -1741,7 +1749,7 @@ impl Application for NotesApp {
         let m = self.metrics();
         if self.needs_rebuild || size_changed {
             let r = self.switcher_rect();
-            self.switcher_input.set_rect(r.x + 12.0, r.y + 12.0, r.width - 24.0, 32.0);
+            self.switcher_input.set_rect(r.x + 12.0, r.y + 12.0, r.width - 24.0, cce_ui::layout::textbox_height());
             let sb = m.search_box;
             self.search_input.set_rect(sb.x, sb.y, sb.width, sb.height);
             self.needs_rebuild = false;
