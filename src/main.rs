@@ -611,11 +611,16 @@ impl NotesApp {
 
     fn vault_changed(&mut self, paths: Vec<PathBuf>) {
         let Some(ix) = self.index.as_mut() else { return };
-        ix.apply_changes(&paths);
+        // A path the index has not seen is a file (or folder) that just
+        // appeared; with a removal, the vault's set of files changed — the
+        // only change that can move what a link resolves to.
+        let appeared = paths.iter().any(|p| ix.rel(p).is_some_and(|r| ix.entry(&r).is_none()));
+        let changes = ix.apply_changes(&paths);
         // An image added, changed or removed: links resolve again, and the
         // editor asks again (it only asks while laying a line out).
         let images_touched = paths.iter().any(|p| cce_vault::markdown::is_image(&p.to_string_lossy()));
-        self.images.vault_changed(ix, &paths);
+        let relink = appeared || !changes.removed.is_empty() || images_touched;
+        self.images.vault_changed(ix, &paths, relink);
         if images_touched {
             self.editor.invalidate();
         }

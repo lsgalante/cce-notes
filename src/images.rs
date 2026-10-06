@@ -144,12 +144,20 @@ impl Images {
         self.0.borrow_mut().links.clear();
     }
 
-    /// Files changed in the vault: links resolve afresh (an image may have
-    /// appeared), and a changed image decodes again. True when an image
-    /// on screen went away.
-    pub fn vault_changed(&self, index: &Index, paths: &[PathBuf]) -> bool {
+    /// Files changed in the vault: a changed image decodes again, and with
+    /// `relink` — the vault's set of files changed (one added or removed),
+    /// or an image did — links resolve afresh, since only then can one
+    /// point somewhere new. True when an image on screen went away.
+    ///
+    /// Until 2026-10-06 every change relinked, and the open note's own
+    /// autosave comes back as one: each embed then failed its lookup for a
+    /// frame (drawn as its link text) and the pump that resolved it again
+    /// asked the editor for a second layout — a flicker per save.
+    pub fn vault_changed(&self, index: &Index, paths: &[PathBuf], relink: bool) -> bool {
         let mut inner = self.0.borrow_mut();
-        inner.links.clear();
+        if relink {
+            inner.links.clear();
+        }
         let mut dropped = false;
         for p in paths {
             let Some(rel) = index.rel(p) else { continue };
@@ -246,6 +254,25 @@ mod tests {
         std::fs::write(&p, r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="red"/></svg>"#).unwrap();
         let d = decode(&p).unwrap();
         assert_eq!((d.natural, d.tex), ((40, 20), (80, 40)));
+    }
+
+    #[test]
+    fn a_note_edit_keeps_resolved_links_and_an_image_change_drops_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("n.md");
+        std::fs::write(&note, "![[pic.png]]\n").unwrap();
+        image::RgbaImage::new(4, 4).save(dir.path().join("pic.png")).unwrap();
+        let ix = Index::open(dir.path(), false).unwrap();
+        let images = Images::default();
+        assert_eq!(images.lookup("pic.png"), None);
+        images.pump(&ix, Some("n.md"), |_, _| {});
+        assert_eq!(images.0.borrow().links.get("pic.png"), Some(&Some("pic.png".to_string())));
+        // The note's own autosave: no file came or went.
+        images.vault_changed(&ix, &[note.clone()], false);
+        assert!(images.0.borrow().links.contains_key("pic.png"), "an edit to a note dropped its embeds' links");
+        // The picture itself changed (or a file came or went): relink.
+        images.vault_changed(&ix, &[dir.path().join("pic.png")], true);
+        assert!(!images.0.borrow().links.contains_key("pic.png"));
     }
 
     #[test]
