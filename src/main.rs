@@ -1885,6 +1885,14 @@ impl Application for NotesApp {
     fn handle_pointer_move(&mut self, pos: LogicalPosition, needs_rebuild: &mut bool) {
         let (x, y) = (pos.x as f32, pos.y as f32);
         self.pointer = (x, y);
+        // The shared context menu (the switcher's or the search box's) gets the
+        // pointer to itself while open, over the switcher too: its row highlight.
+        if cce_ui::widget::context_menu::is_visible() {
+            if cce_ui::widget::context_menu::cursor_moved(x, y) {
+                *needs_rebuild = true;
+            }
+            return;
+        }
         let ev = Event::PointerMove { x, y, local_x: x, local_y: y };
         if self.switcher.is_some() {
             let row = self.switcher_row_at(x, y);
@@ -1937,8 +1945,25 @@ impl Application for NotesApp {
         needs_rebuild: &mut bool,
     ) -> Option<Message> {
         let (x, y) = (pos.x as f32, pos.y as f32);
-        let ev = Event::MouseButton { button, state, x, y, local_x: x, local_y: y };
         *needs_rebuild = true;
+
+        // The shared context menu a right-click on the switcher or search box
+        // opens takes every click while open: a row runs, a press anywhere else
+        // dismisses it -- and only it, so the press that closes the menu does
+        // not also close the switcher beneath. The toolkit leaves this routing to
+        // the app; without it the menu could not be closed by clicking outside
+        // it, and its rows did nothing. A Paste or Cut is a new query.
+        if cce_ui::widget::context_menu::is_visible() {
+            cce_ui::widget::context_menu::mouse_input(button, state, x, y, Some(&mut self.ui_context));
+            if self.switcher.is_some() {
+                self.refresh_switcher();
+            } else {
+                self.refresh_search(false);
+            }
+            return None;
+        }
+
+        let ev = Event::MouseButton { button, state, x, y, local_x: x, local_y: y };
         let pressed = state == ElementState::Pressed && button == MouseButton::Left;
 
         if self.switcher.is_some() {
