@@ -153,7 +153,7 @@ impl Panel {
                     Kind::Header => (family.clone(), small, cce_ui::colors::TEXT_DIM, TextAttrs::default()),
                     Kind::Title => (family.clone(), size, cce_ui::colors::TEXT_FG, TextAttrs::default()),
                     Kind::Line => (body.clone(), small, cce_ui::colors::TEXT_FG, TextAttrs::default()),
-                    Kind::Note => (body.clone(), small, cce_ui::colors::TEXT_DIM, TextAttrs { italic: true, weight: None }),
+                    Kind::Note => (body.clone(), small, cce_ui::colors::TEXT_DIM, TextAttrs { italic: true, weight: None, ..Default::default() }),
                 };
                 let ty = cce_ui::layout::align_text_y(r.y, r.height, fsize, 0.0);
                 pc.text_attrs(item.text.clone(), x, ty, fsize, srgb_u8(color), Some(font), bounds, attrs);
