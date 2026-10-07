@@ -1734,10 +1734,8 @@ impl Application for NotesApp {
     fn display_list(&mut self, size: LogicalSize, scale: f64) -> Option<DisplayList> {
         if !self.widgets_registered {
             self.widgets_registered = true;
-            let (id, ptr) = (self.switcher_input.id(), self.switcher_input.as_ptr_mut());
-            self.ui_context.register_widget(id, ptr);
-            let (id, ptr) = (self.search_input.id(), self.search_input.as_ptr_mut());
-            self.ui_context.register_widget(id, ptr);
+            self.ui_context.register_host(&mut self.switcher_input);
+            self.ui_context.register_host(&mut self.search_input);
         }
         let size_changed =
             self.width != size.width as u32 || self.height != size.height as u32 || self.scale != scale;
