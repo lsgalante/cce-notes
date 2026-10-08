@@ -34,7 +34,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use cce_ui::widget::Owned;
-use cce_ui::engine::{Application, CursorIcon, EngineState, LogicalPosition, LogicalSize, WindowSettings};
+use cce_ui::engine::{Application, CursorIcon, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{DisplayList, PaintCtx};
 use cce_ui::widget::{
@@ -44,7 +44,6 @@ use cce_ui::widget::{
 use cce_ui::widget::doc_editor::{self, DocEditor, EditorTheme, Pos};
 use cce_vault::markdown::{Block, SpanLink};
 use cce_vault::{FileKind, Index, VaultWatcher};
-use wayland_client::QueueHandle;
 
 use instance::Command;
 use panel::{Action, Panel};
@@ -1567,7 +1566,9 @@ impl Application for NotesApp {
         Some(&mut self.ui_context)
     }
 
-    fn new(_qh: &QueueHandle<EngineState<Self>>, sender: calloop::channel::Sender<Self::Message>) -> Self {
+    fn create(sender: cce_ui::engine::AppSender<Self::Message>) -> Self {
+        // The app keeps calloop's sender; `AppSender` converts into it.
+        let sender: calloop::channel::Sender<Self::Message> = sender.into();
         let startup = STARTUP.get().expect("startup set in main");
         let (index, vault_error, watcher) = match &startup.vault {
             Ok(root) => match Index::open(root, true) {
