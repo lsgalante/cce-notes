@@ -1562,6 +1562,12 @@ impl Application for NotesApp {
         Some(&self.ui_context)
     }
 
+    /// Tab accepts the editor's link completion, as Enter does. The toolkit's Tab walk (on by
+    /// default since 2026-10-08) would take it first.
+    fn plate_navigation(&self) -> bool {
+        false
+    }
+
     fn ui_context_mut(&mut self) -> Option<&mut cce_ui::context::UiContext> {
         Some(&mut self.ui_context)
     }
