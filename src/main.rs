@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use cce_ui::widget::Owned;
 use cce_ui::engine::{Application, CursorIcon, EngineState, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{DisplayList, PaintCtx};
@@ -234,10 +235,10 @@ struct NotesApp {
     hist_pos: usize,
 
     switcher: Option<Switcher>,
-    switcher_input: Adapted<TextBox>,
+    switcher_input: Owned<Adapted<TextBox>>,
 
     left_tab: LeftTab,
-    search_input: Adapted<TextBox>,
+    search_input: Owned<Adapted<TextBox>>,
     search_panel: Panel,
     /// The query the search panel shows results for.
     search_seen: String,
@@ -1634,9 +1635,9 @@ impl Application for NotesApp {
             history: Vec::new(),
             hist_pos: 0,
             switcher: None,
-            switcher_input,
+            switcher_input: Owned::new(switcher_input),
             left_tab: LeftTab::Files,
-            search_input,
+            search_input: Owned::new(search_input),
             search_panel: Panel::default(),
             search_seen: String::new(),
             show_side: true,
