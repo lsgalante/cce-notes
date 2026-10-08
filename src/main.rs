@@ -563,7 +563,7 @@ impl NotesApp {
             self.completion = None;
             self.invalidate();
         } else {
-            self.search_input.unfocus();
+            self.ui_context.unfocus_widget(&mut self.search_input);
         }
         self.mode = mode;
         self.needs_rebuild = true;
@@ -670,7 +670,7 @@ impl NotesApp {
 
     fn close_switcher(&mut self) {
         self.switcher = None;
-        self.switcher_input.unfocus();
+        self.ui_context.unfocus_widget(&mut self.switcher_input);
         self.needs_rebuild = true;
     }
 
@@ -922,7 +922,7 @@ impl NotesApp {
         match self.mode {
             Mode::Reading => self.pending_line = Some(line),
             Mode::Source => {
-                self.search_input.unfocus();
+                self.ui_context.unfocus_widget(&mut self.search_input);
                 self.editor.reveal_line(line);
             }
         }
@@ -1994,7 +1994,7 @@ impl Application for NotesApp {
         // The search box keeps the keyboard only while it is clicked into.
         let in_search = self.left_tab == LeftTab::Search && m.search_box.contains(x, y);
         if pressed && !in_search && self.search_input.editing {
-            self.search_input.unfocus();
+            self.ui_context.unfocus_widget(&mut self.search_input);
         }
         if in_search {
             if pressed && !self.search_input.editing {
@@ -2272,14 +2272,14 @@ impl Application for NotesApp {
             if pressed {
                 match &event.logical_key {
                     Key::Named(NamedKey::Escape) => {
-                        self.search_input.unfocus();
+                        self.ui_context.unfocus_widget(&mut self.search_input);
                         return None;
                     }
                     Key::Named(NamedKey::Enter) => {
                         // Enter opens the first result.
                         let first = self.search_panel.items.iter().find_map(|i| i.action.clone());
                         if let Some(a) = first {
-                            self.search_input.unfocus();
+                            self.ui_context.unfocus_widget(&mut self.search_input);
                             self.run_action(a);
                         }
                         return None;
