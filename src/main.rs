@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use cce_ui::widget::Owned;
+use cce_ui::widget::Handle;
 use cce_ui::engine::{Application, CursorIcon, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{DisplayList, PaintCtx};
@@ -234,10 +234,10 @@ struct NotesApp {
     hist_pos: usize,
 
     switcher: Option<Switcher>,
-    switcher_input: Owned<Adapted<TextBox>>,
+    switcher_input: Handle<Adapted<TextBox>>,
 
     left_tab: LeftTab,
-    search_input: Owned<Adapted<TextBox>>,
+    search_input: Handle<Adapted<TextBox>>,
     search_panel: Panel,
     /// The query the search panel shows results for.
     search_seen: String,
@@ -262,7 +262,6 @@ struct NotesApp {
     scale: f64,
     needs_rebuild: bool,
     ui_context: cce_ui::context::UiContext,
-    widgets_registered: bool,
     pointer: (f32, f32),
 }
 
@@ -333,7 +332,7 @@ impl NotesApp {
 
     /// The editor takes keys: editing, with nothing else holding them.
     fn editor_focused(&self) -> bool {
-        self.mode == Mode::Source && self.switcher.is_none() && !self.search_input.editing
+        self.mode == Mode::Source && self.switcher.is_none() && !self.ui_context[self.search_input].editing
     }
 
     fn rebuild_rows(&mut self) {
@@ -563,7 +562,7 @@ impl NotesApp {
             self.completion = None;
             self.invalidate();
         } else {
-            self.ui_context.unfocus_widget(&mut self.search_input);
+            self.ui_context.unfocus_id(self.search_input.id());
         }
         self.mode = mode;
         self.needs_rebuild = true;
@@ -657,28 +656,28 @@ impl NotesApp {
     // ---- quick switcher -------------------------------------------------
 
     fn open_switcher(&mut self, query: &str) {
-        self.switcher_input.text = query.to_string();
-        self.switcher_input.edit_buffer = query.to_string();
-        self.switcher_input.cursor_idx = query.chars().count();
-        self.switcher_input.select_anchor = None;
+        self.ui_context[self.switcher_input].text = query.to_string();
+        self.ui_context[self.switcher_input].edit_buffer = query.to_string();
+        self.ui_context[self.switcher_input].cursor_idx = query.chars().count();
+        self.ui_context[self.switcher_input].select_anchor = None;
         self.switcher =
             Some(Switcher { choices: Vec::new(), selected: 0, query: "\u{0}".into(), rename: None, hint: None });
-        self.ui_context.set_focused(&mut self.switcher_input);
-        WidgetHost::focus(&mut self.switcher_input);
+        self.ui_context.set_focused_id(self.switcher_input.id());
+        WidgetHost::focus(&mut self.ui_context[self.switcher_input]);
         self.refresh_switcher();
     }
 
     fn close_switcher(&mut self) {
         self.switcher = None;
-        self.ui_context.unfocus_widget(&mut self.switcher_input);
+        self.ui_context.unfocus_id(self.switcher_input.id());
         self.needs_rebuild = true;
     }
 
     fn switcher_query(&self) -> String {
-        if self.switcher_input.editing {
-            self.switcher_input.edit_buffer.clone()
+        if self.ui_context[self.switcher_input].editing {
+            self.ui_context[self.switcher_input].edit_buffer.clone()
         } else {
-            self.switcher_input.text.clone()
+            self.ui_context[self.switcher_input].text.clone()
         }
     }
 
@@ -874,10 +873,10 @@ impl NotesApp {
     }
 
     fn search_query(&self) -> String {
-        if self.search_input.editing {
-            self.search_input.edit_buffer.clone()
+        if self.ui_context[self.search_input].editing {
+            self.ui_context[self.search_input].edit_buffer.clone()
         } else {
-            self.search_input.text.clone()
+            self.ui_context[self.search_input].text.clone()
         }
     }
 
@@ -898,13 +897,13 @@ impl NotesApp {
     fn open_search(&mut self, query: &str) {
         self.left_tab = LeftTab::Search;
         self.show_tree = true;
-        self.search_input.text = query.to_string();
-        self.search_input.edit_buffer = query.to_string();
-        self.search_input.cursor_idx = query.chars().count();
-        self.search_input.select_anchor = None;
-        self.search_input.sync_editor_state();
-        self.ui_context.set_focused(&mut self.search_input);
-        WidgetHost::focus(&mut self.search_input);
+        self.ui_context[self.search_input].text = query.to_string();
+        self.ui_context[self.search_input].edit_buffer = query.to_string();
+        self.ui_context[self.search_input].cursor_idx = query.chars().count();
+        self.ui_context[self.search_input].select_anchor = None;
+        self.ui_context[self.search_input].sync_editor_state();
+        self.ui_context.set_focused_id(self.search_input.id());
+        WidgetHost::focus(&mut self.ui_context[self.search_input]);
         self.refresh_search(true);
         self.invalidate();
     }
@@ -922,7 +921,7 @@ impl NotesApp {
         match self.mode {
             Mode::Reading => self.pending_line = Some(line),
             Mode::Source => {
-                self.ui_context.unfocus_widget(&mut self.search_input);
+                self.ui_context.unfocus_id(self.search_input.id());
                 self.editor.reveal_line(line);
             }
         }
@@ -1262,7 +1261,7 @@ impl NotesApp {
         let active = if self.left_tab == LeftTab::Files { 0 } else { 1 };
         paint_tabs(pc, m.left_tabs, &["Files", "Search"], active);
         if self.left_tab == LeftTab::Search {
-            cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.search_input, pc);
+            cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.search_input], pc);
             if self.search_panel.items.is_empty() {
                 let (family, size) = cce_ui::layout::tree_font_parsed();
                 let b = m.tree_body;
@@ -1414,7 +1413,7 @@ impl NotesApp {
         let Some(sw) = &self.switcher else { return };
         let r = self.switcher_rect();
         pc.rounded_rect(r, 10.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_BG);
-        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.switcher_input, pc);
+        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.switcher_input], pc);
         let (family, size) = cce_ui::layout::list_font_parsed();
         let top = r.y + switcher_rows_top();
         for (i, c) in sw.choices.iter().enumerate() {
@@ -1610,6 +1609,8 @@ impl Application for NotesApp {
         let switcher_input = TextBox::new(String::new()).with_placeholder("Find or create a note…");
         let search_input = TextBox::new(String::new()).with_placeholder("Search");
 
+        // The context owns the widgets; the app keeps their handles.
+        let mut ui_context = cce_ui::context::UiContext::new();
         let mut app = NotesApp {
             keys: Keys::load(),
             index,
@@ -1642,9 +1643,9 @@ impl Application for NotesApp {
             history: Vec::new(),
             hist_pos: 0,
             switcher: None,
-            switcher_input: Owned::new(switcher_input),
+            switcher_input: ui_context.insert(switcher_input),
             left_tab: LeftTab::Files,
-            search_input: Owned::new(search_input),
+            search_input: ui_context.insert(search_input),
             search_panel: Panel::default(),
             search_seen: String::new(),
             show_side: true,
@@ -1660,8 +1661,7 @@ impl Application for NotesApp {
             height: 700,
             scale: 1.0,
             needs_rebuild: true,
-            ui_context: cce_ui::context::UiContext::new(),
-            widgets_registered: false,
+            ui_context,
             pointer: (0.0, 0.0),
         };
         app.rebuild_rows();
@@ -1740,11 +1740,6 @@ impl Application for NotesApp {
     }
 
     fn display_list(&mut self, size: LogicalSize, scale: f64) -> Option<DisplayList> {
-        if !self.widgets_registered {
-            self.widgets_registered = true;
-            self.ui_context.register_host(&mut self.switcher_input);
-            self.ui_context.register_host(&mut self.search_input);
-        }
         let size_changed =
             self.width != size.width as u32 || self.height != size.height as u32 || self.scale != scale;
         if size_changed {
@@ -1760,9 +1755,9 @@ impl Application for NotesApp {
         let m = self.metrics();
         if self.needs_rebuild || size_changed {
             let r = self.switcher_rect();
-            self.switcher_input.set_rect(r.x + 12.0, r.y + 12.0, r.width - 24.0, cce_ui::layout::textbox_height());
+            self.ui_context[self.switcher_input].set_rect(r.x + 12.0, r.y + 12.0, r.width - 24.0, cce_ui::layout::textbox_height());
             let sb = m.search_box;
-            self.search_input.set_rect(sb.x, sb.y, sb.width, sb.height);
+            self.ui_context[self.search_input].set_rect(sb.x, sb.y, sb.width, sb.height);
             self.needs_rebuild = false;
             self.ui_context.rebuild_spatial_grid();
             // Keep scroll offsets in range after a resize or a new layout.
@@ -1993,13 +1988,13 @@ impl Application for NotesApp {
         let m = self.metrics();
         // The search box keeps the keyboard only while it is clicked into.
         let in_search = self.left_tab == LeftTab::Search && m.search_box.contains(x, y);
-        if pressed && !in_search && self.search_input.editing {
-            self.ui_context.unfocus_widget(&mut self.search_input);
+        if pressed && !in_search && self.ui_context[self.search_input].editing {
+            self.ui_context.unfocus_id(self.search_input.id());
         }
         if in_search {
-            if pressed && !self.search_input.editing {
-                self.ui_context.set_focused(&mut self.search_input);
-                WidgetHost::focus(&mut self.search_input);
+            if pressed && !self.ui_context[self.search_input].editing {
+                self.ui_context.set_focused_id(self.search_input.id());
+                WidgetHost::focus(&mut self.ui_context[self.search_input]);
             }
             self.ui_context.propagate_event(&ev, self.search_input.id());
             return None;
@@ -2241,7 +2236,7 @@ impl Application for NotesApp {
             if k(&self.keys.search) && self.index.is_some() {
                 let q = self.search_query();
                 self.open_search(&q);
-                self.search_input.select_all();
+                self.ui_context[self.search_input].select_all();
                 return None;
             }
             if k(&self.keys.rename) && self.current.is_some() {
@@ -2268,18 +2263,18 @@ impl Application for NotesApp {
         }
 
         // The search box, while it holds the keyboard.
-        if self.search_input.editing {
+        if self.ui_context[self.search_input].editing {
             if pressed {
                 match &event.logical_key {
                     Key::Named(NamedKey::Escape) => {
-                        self.ui_context.unfocus_widget(&mut self.search_input);
+                        self.ui_context.unfocus_id(self.search_input.id());
                         return None;
                     }
                     Key::Named(NamedKey::Enter) => {
                         // Enter opens the first result.
                         let first = self.search_panel.items.iter().find_map(|i| i.action.clone());
                         if let Some(a) = first {
-                            self.ui_context.unfocus_widget(&mut self.search_input);
+                            self.ui_context.unfocus_id(self.search_input.id());
                             self.run_action(a);
                         }
                         return None;
