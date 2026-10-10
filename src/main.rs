@@ -2606,7 +2606,7 @@ fn main() {
         explicit = Some(PathBuf::from(args.remove(i + 1)));
         args.remove(i);
     }
-    let command = match Command::from_args(&args) {
+    let command = match instance::from_args(&args) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("cce-notes: {e}");

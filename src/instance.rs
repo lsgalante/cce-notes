@@ -31,7 +31,7 @@ use std::sync::Mutex;
 
 use crate::Message;
 
-const PREFIX: &str = "cce-notes";
+use cce_vault::notes_ipc::PREFIX;
 /// The open note's vault path, for `current`. Set by the app whenever it
 /// changes; read by the listener without a trip through the event loop.
 static CURRENT: Mutex<Option<String>> = Mutex::new(None);
@@ -46,75 +46,29 @@ pub fn set_vault(root: Option<&std::path::Path>) {
     *VAULT.lock().unwrap_or_else(|e| e.into_inner()) = root.map(|r| r.to_string_lossy().into_owned());
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Command {
-    Open { target: String, line: Option<usize> },
-    Daily(Option<chrono::NaiveDate>),
-    Search(String),
-    Show,
-}
+/// The protocol's requests — cce-vault's, the grammar every sender builds.
+pub use cce_vault::notes_ipc::Command;
+use cce_vault::notes_ipc::{parse_date, Query};
 
-impl Command {
-    /// The command line's own arguments as a socket command:
-    /// `cce-notes [open] <path> [line]`, `cce-notes daily [date]`,
-    /// `cce-notes search <query…>`, `cce-notes show`, or nothing (also
-    /// `show`). The verbs are reserved, as `daily` and `search` always were:
-    /// a note named `show` opens with `cce-notes open show`.
-    pub fn from_args(args: &[String]) -> Result<Command, String> {
-        let words: Vec<&str> = args.iter().map(String::as_str).collect();
-        match words.as_slice() {
-            [] | ["show"] => Ok(Command::Show),
-            ["daily"] => Ok(Command::Daily(None)),
-            ["daily", d] => parse_date(d).map(|d| Command::Daily(Some(d))),
-            ["search", rest @ ..] => Ok(Command::Search(rest.join(" "))),
-            ["open", target] | [target] => Ok(Command::Open { target: absolute(target), line: None }),
-            ["open", target, line] | [target, line] => {
-                let line = line.parse::<usize>().map_err(|_| format!("not a line number: {line}"))?;
-                Ok(Command::Open { target: absolute(target), line: Some(line) })
-            }
-            _ => Err("usage: cce-notes [open] <note> [line] | daily [YYYY-MM-DD] | search <query> | show".into()),
+/// The command line's own arguments as a socket command:
+/// `cce-notes [open] <path> [line]`, `cce-notes daily [date]`,
+/// `cce-notes search <query…>`, `cce-notes show`, or nothing (also
+/// `show`). The verbs are reserved, as `daily` and `search` always were:
+/// a note named `show` opens with `cce-notes open show`.
+pub fn from_args(args: &[String]) -> Result<Command, String> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        [] | ["show"] => Ok(Command::Show),
+        ["daily"] => Ok(Command::Daily(None)),
+        ["daily", d] => parse_date(d).map(|d| Command::Daily(Some(d))),
+        ["search", rest @ ..] => Ok(Command::Search(rest.join(" "))),
+        ["open", target] | [target] => Ok(Command::Open { target: absolute(target), line: None }),
+        ["open", target, line] | [target, line] => {
+            let line = line.parse::<usize>().map_err(|_| format!("not a line number: {line}"))?;
+            Ok(Command::Open { target: absolute(target), line: Some(line) })
         }
+        _ => Err("usage: cce-notes [open] <note> [line] | daily [YYYY-MM-DD] | search <query> | show".into()),
     }
-
-    pub fn to_line(&self) -> String {
-        match self {
-            Command::Open { target, line: Some(l) } => format!("open {target}\t{l}"),
-            Command::Open { target, line: None } => format!("open {target}"),
-            Command::Daily(Some(d)) => format!("daily {d}"),
-            Command::Daily(None) => "daily".into(),
-            Command::Search(q) => format!("search {q}"),
-            Command::Show => "show".into(),
-        }
-    }
-
-    pub fn parse(line: &str) -> Option<Command> {
-        let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
-        // `trim` would also eat the tab before a line number: only spaces.
-        let rest = rest.trim_matches(' ');
-        match verb {
-            "open" if !rest.is_empty() => {
-                // A line rides after a tab, which no note name holds. With
-                // spaces only, the whole text is the target: "Chapter 3" is
-                // a name, and the app sorts out an older sender's
-                // `open Note 12` against the vault.
-                match rest.rsplit_once('\t') {
-                    Some((t, l)) if l.trim().parse::<usize>().is_ok() && !t.trim().is_empty() => {
-                        Some(Command::Open { target: t.trim().to_string(), line: l.trim().parse().ok() })
-                    }
-                    _ => Some(Command::Open { target: rest.to_string(), line: None }),
-                }
-            }
-            "daily" if rest.is_empty() => Some(Command::Daily(None)),
-            "daily" => parse_date(rest).ok().map(|d| Command::Daily(Some(d))),
-            "search" => Some(Command::Search(rest.to_string())),
-            "show" => Some(Command::Show),
-            _ => None,
-        }
-    }
-}
-
-fn parse_date(s: &str) -> Result<chrono::NaiveDate, String> {
-    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| format!("not a date (YYYY-MM-DD): {s}"))
 }
 
 /// A path that exists here travels absolute: the instance's cwd differs.
@@ -155,7 +109,7 @@ pub fn running_instance_fits(reply: Option<&str>, wanted: &std::path::Path) -> b
 
 /// Ask the running instance, if any, which vault it shows.
 pub fn running_vault_reply() -> Option<String> {
-    cce_ui::ipc::instance::forward(PREFIX, "vault")
+    cce_ui::ipc::instance::forward(PREFIX, Query::Vault.as_str())
 }
 
 /// Hand `cmd` to a running instance, or claim the socket. True when a
@@ -185,10 +139,9 @@ pub fn spawn_listener(sender: calloop::channel::Sender<Message>) -> bool {
 
 /// The queries the listener answers from shared state: `current`, `vault`.
 fn query(line: &str) -> Option<String> {
-    let slot = match line {
-        "current" => &CURRENT,
-        "vault" => &VAULT,
-        _ => return None,
+    let slot = match Query::parse(line)? {
+        Query::Current => &CURRENT,
+        Query::Vault => &VAULT,
     };
     Some(match slot.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         Some(v) => format!("ok {v}"),
@@ -221,11 +174,11 @@ mod tests {
             (vec!["search", "two", "words"], Command::Search("two words".into())),
         ];
         for (a, want) in cases {
-            let got = Command::from_args(&args(&a)).unwrap();
+            let got = from_args(&args(&a)).unwrap();
             assert_eq!(got, want, "{a:?}");
             assert_eq!(Command::parse(&got.to_line()), Some(want));
         }
-        assert!(Command::from_args(&args(&["daily", "tomorrow"])).is_err());
+        assert!(from_args(&args(&["daily", "tomorrow"])).is_err());
         assert!(Command::parse("open ").is_none());
         assert!(Command::parse("bogus").is_none());
         // A note whose name is a number is a target, not a line.
@@ -236,11 +189,11 @@ mod tests {
     fn a_name_ending_in_a_number_stays_whole() {
         let open = |t: &str, l| Some(Command::Open { target: t.into(), line: l });
         // `cce-notes "Chapter 3"` travels and arrives as that name.
-        let cmd = Command::from_args(&args(&["Chapter 3"])).unwrap();
+        let cmd = from_args(&args(&["Chapter 3"])).unwrap();
         assert_eq!(cmd.to_line(), "open Chapter 3");
         assert_eq!(Command::parse(&cmd.to_line()), open("Chapter 3", None));
         // A line rides after a tab, even after such a name.
-        let cmd = Command::from_args(&args(&["open", "Chapter 3", "12"])).unwrap();
+        let cmd = from_args(&args(&["open", "Chapter 3", "12"])).unwrap();
         assert_eq!(Command::parse(&cmd.to_line()), open("Chapter 3", Some(12)));
         // The older space form arrives whole; the app resolves it.
         assert_eq!(Command::parse("open Note 12"), open("Note 12", None));
