@@ -2642,6 +2642,21 @@ mod tests {
     }
 
     #[test]
+    fn a_note_name_ending_in_a_number_opens_as_itself() {
+        let (_d, mut app) = app_over(&[("Chapter 3.md", "c\n"), ("Notes.md", "a\nb\nc\n")]);
+        app.open_target("Chapter 3", None);
+        assert_eq!(app.current.as_deref(), Some("Chapter 3.md"));
+        // An older sender's `open Notes 2`: no note is called that, so 2 is
+        // a (1-based) line of Notes.
+        app.open_target("Notes 2", None);
+        assert_eq!(app.current.as_deref(), Some("Notes.md"));
+        assert_eq!(app.pending_line, Some(1));
+        // Neither names anything: said so, nothing opened.
+        app.open_target("Nothing 4", None);
+        assert_eq!(app.current.as_deref(), Some("Notes.md"));
+    }
+
+    #[test]
     fn quitting_in_a_conflict_keeps_ours_as_a_copy() {
         let (d, mut app) = app_over(&[("dir/A.md", "base\n")]);
         open_and_type(&mut app, "dir/A.md", "mine");
