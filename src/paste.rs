@@ -6,8 +6,16 @@
 //!
 //! The clipboard is read with `wl-paste`, as cce-ui's text paste reads it.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long a paste waits on the clipboard. Ctrl+V decides between an
+/// image and a text paste on the UI thread, and the clipboard's owner is
+/// another app: one that never answers froze the editor (`output()` waits
+/// forever). Past this, it pastes as text.
+const PASTE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Image types, best first, and the extension each is saved with.
 const IMAGE_TYPES: [(&str, &str); 5] =
@@ -83,8 +91,51 @@ fn image_files(list: &str) -> Vec<PathBuf> {
 }
 
 fn wl_paste(args: &[&str]) -> Option<Vec<u8>> {
-    let out = Command::new("wl-paste").args(args).output().ok()?;
-    out.status.success().then_some(out.stdout)
+    let mut cmd = Command::new("wl-paste");
+    cmd.args(args);
+    let out = output_within(cmd, PASTE_TIMEOUT);
+    if out.is_none() {
+        log::debug!("paste: wl-paste {args:?} failed or timed out");
+    }
+    out
+}
+
+/// Run `cmd` and collect its stdout, or `None` when it fails or takes past
+/// `limit` (then it is killed). The output is read on its own thread: a
+/// picture larger than the pipe would otherwise hold the child mid-write
+/// until the deadline, and look like a hang.
+fn output_within(mut cmd: Command, limit: Duration) -> Option<Vec<u8>> {
+    let deadline = Instant::now() + limit;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let Ok(bytes) = rx.recv_timeout(limit) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    exit_by(&mut child, deadline)?.success().then_some(bytes)
+}
+
+/// The child's exit status once it exits, or `None` (killing it) when it
+/// has not by `deadline`.
+fn exit_by(child: &mut std::process::Child, deadline: Instant) -> Option<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait().ok()? {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Write `clip` into `dir` (made if missing): a picture as `Pasted image
@@ -132,6 +183,23 @@ pub fn insertion(embeds: &[String], before: &str, after: &str) -> (String, usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clipboard_that_never_answers_times_out() {
+        let sh = |script: &str| {
+            let mut c = Command::new("sh");
+            c.args(["-c", script]);
+            c
+        };
+        let started = Instant::now();
+        assert_eq!(output_within(sh("sleep 10"), Duration::from_millis(200)), None);
+        assert!(started.elapsed() < Duration::from_secs(2), "it waited for the child");
+        assert_eq!(output_within(sh("printf hi"), PASTE_TIMEOUT).as_deref(), Some(&b"hi"[..]));
+        assert_eq!(output_within(sh("echo x; exit 1"), PASTE_TIMEOUT), None);
+        // Larger than a pipe holds: read as it comes, not mistaken for a hang.
+        let big = output_within(sh("head -c 1000000 /dev/zero"), PASTE_TIMEOUT).unwrap();
+        assert_eq!(big.len(), 1_000_000);
+    }
 
     #[test]
     fn text_wins_over_an_image_rendering() {

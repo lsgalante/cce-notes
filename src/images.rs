@@ -28,6 +28,49 @@ const KEEP: usize = 32;
 /// The largest texture side: a column is under 800 logical px, 1600 at
 /// output scale 2, so more is memory nobody sees.
 const MAX_TEX: u32 = 2048;
+/// Decodes running at once, at most. A raster decodes at full size before
+/// it is shrunk (a 12 MP photo is ~48 MB of pixels), and every embed of a
+/// note asks at once: unbounded, a note of fifty photos wanted gigabytes.
+const MAX_DECODES: usize = 4;
+
+/// A counting semaphore over the decode threads (`MAX_DECODES` slots, or
+/// fewer on a smaller CPU). A thread holds a slot for its decode.
+struct Slots {
+    free: std::sync::Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+impl Slots {
+    const fn new(n: usize) -> Slots {
+        Slots { free: std::sync::Mutex::new(n), freed: std::sync::Condvar::new() }
+    }
+
+    fn take(&self) -> SlotGuard<'_> {
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        SlotGuard(self)
+    }
+}
+
+struct SlotGuard<'a>(&'a Slots);
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.free.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+fn decode_slots() -> &'static Slots {
+    static SLOTS: std::sync::OnceLock<Slots> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| {
+        let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
+        Slots::new(cpus.clamp(1, MAX_DECODES))
+    })
+}
 
 /// A decoded image, straight RGBA8, and the size it shows at before any
 /// fitting — its own pixels for a raster (even when the texture was made
@@ -108,7 +151,10 @@ impl Images {
             let abs = index.abs(&path);
             let done = done.clone();
             std::thread::spawn(move || {
-                let decoded = decode(&abs);
+                let decoded = {
+                    let _slot = decode_slots().take();
+                    decode(&abs)
+                };
                 if decoded.is_none() {
                     log::warn!("could not decode {}", abs.display());
                 }
@@ -273,6 +319,30 @@ mod tests {
         // The picture itself changed (or a file came or went): relink.
         images.vault_changed(&ix, &[dir.path().join("pic.png")], true);
         assert!(!images.0.borrow().links.contains_key("pic.png"));
+    }
+
+    #[test]
+    fn decodes_run_a_few_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let slots = Arc::new(Slots::new(3));
+        let (now, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let (slots, now, most) = (slots.clone(), now.clone(), most.clone());
+                std::thread::spawn(move || {
+                    let _slot = slots.take();
+                    let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(most.load(Ordering::SeqCst), 3, "more decodes ran at once than slots");
     }
 
     #[test]

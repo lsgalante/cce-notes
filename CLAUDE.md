@@ -114,7 +114,10 @@ still show as links.
   second and later renderer (`seen_renderer`). Verified with
   `CCE_UI_FAULT_RECONNECT` at scale 2 against a control built without it:
   the control's images went blank, these stayed.
-- **Pasting (Ctrl+V, `paste.rs`)**: a picture on the clipboard is saved
+- **Pasting (Ctrl+V, `paste.rs`)** reads the clipboard with `wl-paste`
+  under `PASTE_TIMEOUT` (`output_within`): the image-or-text decision runs
+  on the UI thread, so an owner that never answers must not freeze it.
+  A picture on the clipboard is saved
   as `Pasted image <YYYYMMDDHHMMSS>.<ext>`, and copied image files under
   their own names, in Obsidian's attachment folder for the note
   (`cce_vault::attachments`); each `![[…]]` goes on its own line at the
@@ -139,7 +142,9 @@ still show as links.
   size, so sizing is unchanged); SVGs show at their intrinsic size,
   rasterised at twice it. Formats: png, jpeg, gif (first frame), webp,
   bmp, svg — not avif. The 32 most recently drawn stay decoded across
-  notes.
+  notes. At most `MAX_DECODES` (4, fewer on a smaller CPU) decode at once
+  (`decode_slots`): a raster decodes at full size before it shrinks, and a
+  note's embeds all ask at once.
 
 ## The reading view (`reading.rs`)
 
@@ -183,7 +188,9 @@ cce-notes [show]                 # just bring the instance up
 `daily`, `search` and `show` are verbs, not note names: a note called one
 of them opens with an explicit `open` (`cce-notes open show`).
 
-A second launch forwards its command to the running instance and exits.
+A second launch forwards its command to the running instance and exits —
+unless it names a `--vault` the instance does not show (it asks `vault`
+first): then it runs as a window of its own, without the socket or MCP.
 Keys come from input.kdl's `cce-notes` domain: `quick_switcher` (ctrl+o),
 `toggle_mode` (ctrl+e), `toggle_source` (ctrl+shift+e: live preview ↔
 source), `save` (ctrl+s), `reload` (ctrl+r), `back`
@@ -192,9 +199,16 @@ source), `save` (ctrl+s), `reload` (ctrl+r), `back`
 (ctrl+g: `cce-graph --vault <this vault> --local`, single-instance), `daily`
 (alt+d), `quit` (ctrl+q). Mouse back/forward walk the history too.
 
-The instance socket also answers `current` (`ok <vault path>`) straight
-from its listener thread, from a value `open_path`/`rename` keep up to
-date (`instance::set_current`) — cce-graph's local graph polls it.
+On the socket, `open <target>` takes everything after the verb as the
+target — a note may be called "Chapter 3" — and a line follows a tab
+(`open <target>\t<line>`). An older sender's `open <note> <line>` still
+works: `open_target` reads the number as a line only when the whole text
+names no note and the text before it does.
+
+The instance socket also answers `current` (`ok <vault path>`) and
+`vault` (`ok <root>`) straight from its listener thread, from values the
+app keeps up to date (`instance::set_current`, `set_vault`) — cce-graph's
+local graph polls `current`.
 
 ## MCP
 
