@@ -406,7 +406,7 @@ impl NotesApp {
 
     /// The reading column's origin and width inside the note pane.
     fn reading_frame(&self, m: &Metrics) -> (f32, f32, f32) {
-        let width = (m.note.width - 2.0 * READ_PAD).min(READ_MAX_W).max(80.0);
+        let width = (m.note.width - 2.0 * READ_PAD).clamp(80.0, READ_MAX_W);
         let x = m.note.x + (m.note.width - width) / 2.0;
         (x, m.note.y + READ_PAD, width)
     }
@@ -628,23 +628,45 @@ impl NotesApp {
     /// Open what a command or argv names: an absolute file in the vault,
     /// a vault path, or a note name; with an optional `#heading`.
     fn open_target(&mut self, target: &str, line: Option<usize>) {
-        let Some(ix) = &self.index else { return };
+        if self.index.is_none() {
+            return;
+        }
+        // An older sender's `open <note> <line>` arrives whole (the line
+        // now rides after a tab): a trailing number is a line only when the
+        // whole text names no note and the text before it does — so a note
+        // called "Chapter 3" opens as itself.
+        if line.is_none() && self.resolve_target(target).is_none() {
+            if let Some((t, l)) = target.rsplit_once(' ') {
+                if let (Ok(l), false) = (l.parse::<usize>(), t.trim().is_empty()) {
+                    if self.resolve_target(t.trim_end()).is_some() {
+                        return self.open_target(t.trim_end(), Some(l));
+                    }
+                }
+            }
+        }
         let (name, sub) = match target.split_once('#') {
             Some((n, s)) => (n, Some(s)),
             None => (target, None),
         };
-        let path = if Path::new(name).is_absolute() {
-            let p = Path::new(name);
-            p.canonicalize().ok().and_then(|c| ix.rel(&c)).or_else(|| ix.rel(p))
-        } else {
-            ix.lookup(name)
-        };
-        match path {
+        match self.resolve_target(target) {
             Some(p) => {
                 let line = line.map(|l| l.saturating_sub(1)).or_else(|| sub.and_then(|s| self.subpath_line(&p, s)));
                 self.open_path(&p, line, true);
             }
             None => self.set_status(format!("No note named {name}"), true),
+        }
+    }
+
+    /// The vault path a command's target names (its `#heading` aside): an
+    /// absolute file in the vault, a vault path, or a note name.
+    fn resolve_target(&self, target: &str) -> Option<String> {
+        let ix = self.index.as_ref()?;
+        let name = target.split_once('#').map_or(target, |(n, _)| n);
+        if Path::new(name).is_absolute() {
+            let p = Path::new(name);
+            p.canonicalize().ok().and_then(|c| ix.rel(&c)).or_else(|| ix.rel(p))
+        } else {
+            ix.lookup(name)
         }
     }
 
@@ -897,7 +919,7 @@ impl NotesApp {
             }
             let mut notes: Vec<(&String, u64)> =
                 ix.files().iter().filter(|(_, e)| e.kind == FileKind::Note).map(|(p, e)| (p, e.mtime)).collect();
-            notes.sort_by(|a, b| b.1.cmp(&a.1));
+            notes.sort_by_key(|a| std::cmp::Reverse(a.1));
             for (p, _) in notes {
                 if seen.insert(p.clone()) {
                     out.push(p.clone());
@@ -1784,6 +1806,7 @@ impl Application for NotesApp {
         // Only the instance serves MCP: a second copy running standalone
         // would fight it for the port.
         if instance::spawn_listener(sender.clone()) && index.is_some() {
+            instance::set_vault(index.as_ref().map(|ix| ix.root()));
             mcp::start(sender.clone());
         }
         let _ = sender.send(Message::Command(startup.command.clone()));
@@ -1932,7 +1955,7 @@ impl Application for NotesApp {
     }
 
     fn handle_drop(&mut self, mime: &str, data: &[u8], pos: LogicalPosition, needs_rebuild: &mut bool) {
-        self.dropped(mime, data, pos.x as f32, pos.y as f32);
+        self.dropped(mime, data, pos.x, pos.y);
         *needs_rebuild = true;
     }
 
@@ -2013,7 +2036,7 @@ impl Application for NotesApp {
     }
 
     fn handle_pointer_move(&mut self, pos: LogicalPosition, needs_rebuild: &mut bool) {
-        let (x, y) = (pos.x as f32, pos.y as f32);
+        let (x, y) = (pos.x, pos.y);
         self.pointer = (x, y);
         // The shared context menu (the switcher's or the search box's) gets the
         // pointer to itself while open, over the switcher too: its row highlight.
@@ -2074,7 +2097,7 @@ impl Application for NotesApp {
         pos: LogicalPosition,
         needs_rebuild: &mut bool,
     ) -> Option<Message> {
-        let (x, y) = (pos.x as f32, pos.y as f32);
+        let (x, y) = (pos.x, pos.y);
         *needs_rebuild = true;
 
         // The shared context menu a right-click on the switcher or search box
@@ -2222,7 +2245,7 @@ impl Application for NotesApp {
     }
 
     fn handle_mouse_wheel(&mut self, delta: &MouseScrollDelta, pos: LogicalPosition, needs_rebuild: &mut bool) {
-        let (x, y) = (pos.x as f32, pos.y as f32);
+        let (x, y) = (pos.x, pos.y);
         if self.switcher.is_some() {
             return;
         }
@@ -2472,15 +2495,24 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if instance::forward_or_claim(&command) {
-        return;
-    }
     let vault = cce_vault::config::vault_root(explicit.as_deref()).map_err(|e| {
         format!(
             "No vault: {e}\nSet `vault {{ path \"~/Notes\" }}` in ~/.config/cce/config.kdl, \
              or run with --vault <dir> or CCE_VAULT=<dir>."
         )
     });
+    // `--vault` naming another vault than the running instance shows: it
+    // cannot show this one (its note would open there, or a same-named one
+    // would), so this launch is a window of its own — no socket, no MCP.
+    let standalone = match (&explicit, &vault) {
+        (Some(_), Ok(root)) => !instance::running_instance_fits(instance::running_vault_reply().as_deref(), root),
+        _ => false,
+    };
+    if standalone {
+        eprintln!("cce-notes: another window shows a different vault; opening {} in a window of its own", explicit.as_ref().unwrap().display());
+    } else if instance::forward_or_claim(&command) {
+        return;
+    }
     let _ = STARTUP.set(Startup { vault, command });
     cce_ui::engine::run::<NotesApp>();
     instance::cleanup();

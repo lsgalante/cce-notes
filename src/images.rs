@@ -268,7 +268,7 @@ mod tests {
         images.pump(&ix, Some("n.md"), |_, _| {});
         assert_eq!(images.0.borrow().links.get("pic.png"), Some(&Some("pic.png".to_string())));
         // The note's own autosave: no file came or went.
-        images.vault_changed(&ix, &[note.clone()], false);
+        images.vault_changed(&ix, std::slice::from_ref(&note), false);
         assert!(images.0.borrow().links.contains_key("pic.png"), "an edit to a note dropped its embeds' links");
         // The picture itself changed (or a file came or went): relink.
         images.vault_changed(&ix, &[dir.path().join("pic.png")], true);

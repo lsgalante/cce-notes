@@ -52,7 +52,7 @@ pub fn choices(ix: &Index, query: &str) -> Vec<String> {
     if query.trim().is_empty() {
         let mut notes: Vec<(&String, u64)> =
             ix.files().iter().filter(|(_, e)| e.kind == FileKind::Note).map(|(p, e)| (p, e.mtime)).collect();
-        notes.sort_by(|a, b| b.1.cmp(&a.1));
+        notes.sort_by_key(|a| std::cmp::Reverse(a.1));
         return notes.into_iter().take(LIMIT).map(|(p, _)| p.clone()).collect();
     }
     ix.find(query, LIMIT).into_iter().map(|m| m.path).collect()
