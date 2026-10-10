@@ -28,6 +28,7 @@ mod mcp;
 mod panel;
 mod paste;
 mod side;
+mod tables;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -109,6 +110,7 @@ struct Keys {
     search: String,
     rename: String,
     graph: String,
+    sheets: String,
     daily: String,
     quit: String,
 }
@@ -129,6 +131,7 @@ impl Keys {
             search: get("search", "ctrl+shift+f"),
             rename: get("rename", "f2"),
             graph: get("graph", "ctrl+g"),
+            sheets: get("sheets", "ctrl+shift+t"),
             daily: get("daily", "alt+d"),
             quit: get("quit", "ctrl+q"),
         }
@@ -264,6 +267,9 @@ struct NotesApp {
     /// too — only Ctrl+S writes it again, and Ctrl+R closes it.
     gone: bool,
     status: Option<(String, bool)>,
+    /// The context menu up is ours (a right-click over a table), by the
+    /// menu's generation when it was shown; any other is a text box's own.
+    note_menu: Option<u64>,
 
     width: u32,
     height: u32,
@@ -359,6 +365,7 @@ impl NotesApp {
             conflict: false,
             gone: false,
             status: None,
+            note_menu: None,
             width: 1000,
             height: 700,
             scale: 1.0,
@@ -613,6 +620,84 @@ impl NotesApp {
             Err(_) if self.gone => self.close_note(),
             Err(e) => self.set_status(format!("Could not read {cur}: {e}"), true),
         }
+    }
+
+    // ---- tables in cce-sheets --------------------------------------------
+
+    /// The open note's tables, as source line ranges (`tables.rs`).
+    fn note_tables(&self) -> Vec<std::ops::Range<usize>> {
+        if self.current.is_none() {
+            return Vec::new();
+        }
+        tables::table_lines(&self.editor_text())
+    }
+
+    /// The open note's absolute path once it can be handed to cce-sheets:
+    /// it has a table, and the file on disk is what the window shows —
+    /// cce-sheets reads the file, so unsaved edits are saved first. `None`,
+    /// with a status, when not.
+    fn sheets_path(&mut self) -> Option<PathBuf> {
+        let cur = self.current.clone()?;
+        if self.conflict {
+            // The disk copy is not ours (or is gone): cce-sheets would open
+            // something other than the screen, or nothing.
+            self.set_status(self.conflict_hint(), true);
+            return None;
+        }
+        if self.note_tables().is_empty() {
+            self.set_status("This note has no tables", true);
+            return None;
+        }
+        if !self.save() {
+            return None;
+        }
+        self.index.as_ref().map(|ix| ix.abs(&cur))
+    }
+
+    /// "Edit tables in Sheets": `cce-sheets <note>`, one sheet per table.
+    /// Its saves rewrite only the tables' lines and come back through the
+    /// watcher like any other write: a clean buffer reloads, a dirty one
+    /// is a conflict.
+    fn edit_tables_in_sheets(&mut self) {
+        let Some(abs) = self.sheets_path() else { return };
+        let mut cmd = std::process::Command::new("cce-sheets");
+        cmd.arg(&abs);
+        match spawn_detached(cmd) {
+            Ok(()) => self.set_status("Tables opened in cce-sheets; its saves land here", false),
+            Err(e) => self.set_status(format!("Could not start cce-sheets: {e}"), true),
+        }
+    }
+
+    /// The source line under a window point in the note pane, in either
+    /// mode: the editor's own hit test, or in reading view the block the
+    /// point is in (blocks start at their first source line).
+    fn note_line_at(&mut self, x: f32, y: f32) -> Option<usize> {
+        let m = self.metrics();
+        if !m.note.contains(x, y) || self.current.is_none() {
+            return None;
+        }
+        match self.mode {
+            Mode::Source => Some(self.editor.pos_at(x, y).line),
+            Mode::Reading => {
+                let (_, oy, _) = self.reading_frame(&m);
+                let (_, l) = self.layout.as_ref()?;
+                let ly = y - oy + self.read_scroll;
+                l.lines.iter().take_while(|(_, top)| *top <= ly).last().map(|(line, _)| *line)
+            }
+        }
+    }
+
+    /// Right-press over a table: a menu offering it to cce-sheets. False
+    /// when the press missed every table.
+    fn open_table_menu(&mut self, x: f32, y: f32) -> bool {
+        let Some(line) = self.note_line_at(x, y) else { return false };
+        if !tables::in_table(&self.note_tables(), line) {
+            return false;
+        }
+        use cce_ui::widget::context_menu;
+        context_menu::show(x, y, vec!["Edit tables in Sheets".to_string()], 0, cce_ui::widget::WidgetId(0));
+        self.note_menu = Some(context_menu::generation());
+        true
     }
 
     /// Show no note (the one open is gone and its edits were given up).
@@ -2118,7 +2203,22 @@ impl Application for NotesApp {
         // the app; without it the menu could not be closed by clicking outside
         // it, and its rows did nothing. A Paste or Cut is a new query.
         if cce_ui::widget::context_menu::is_visible() {
-            cce_ui::widget::context_menu::mouse_input(button, state, x, y, Some(&mut self.ui_context));
+            use cce_ui::widget::context_menu;
+            // Our table menu runs its own row; the toolkit's dispatch maps
+            // labels into a target widget, and this one has none.
+            if self.note_menu.take() == Some(context_menu::generation()) {
+                if state == ElementState::Pressed {
+                    let row = (button == MouseButton::Left).then(|| context_menu::row_at(x, y)).flatten();
+                    context_menu::hide();
+                    if row == Some(0) {
+                        self.edit_tables_in_sheets();
+                    }
+                } else {
+                    self.note_menu = Some(context_menu::generation());
+                }
+                return None;
+            }
+            context_menu::mouse_input(button, state, x, y, Some(&mut self.ui_context));
             if self.switcher.is_some() {
                 self.refresh_switcher();
             } else {
@@ -2218,6 +2318,9 @@ impl Application for NotesApp {
                 self.hover_hit = false;
                 return None;
             }
+        }
+        if state == ElementState::Pressed && button == MouseButton::Right && self.open_table_menu(x, y) {
+            return None;
         }
         // Back/forward mouse buttons walk the history, as in a browser.
         if state == ElementState::Pressed {
@@ -2416,6 +2519,10 @@ impl Application for NotesApp {
                 if let Err(e) = spawn_detached(cmd) {
                     self.set_status(format!("Could not start cce-graph: {e}"), true);
                 }
+                return None;
+            }
+            if k(&self.keys.sheets) && self.current.is_some() {
+                self.edit_tables_in_sheets();
                 return None;
             }
         }
@@ -2688,5 +2795,50 @@ mod tests {
         app.on_exit();
         assert!(disk(d.path(), "B.md").ends_with("mine"));
         assert_eq!(std::fs::read_dir(d.path()).unwrap().filter(|e| e.as_ref().unwrap().path().is_file()).count(), 1);
+    }
+
+    const TABLE_NOTE: &str = "# Costs\n\n| Item | Price |\n|------|------:|\n| Tea  | 3     |\n\nprose\n";
+
+    #[test]
+    fn sheets_gets_the_note_saved_and_only_with_a_table() {
+        let (d, mut app) = app_over(&[("T.md", TABLE_NOTE), ("Plain.md", "no table\n")]);
+        // Unsaved edits are written first: cce-sheets reads the file.
+        open_and_type(&mut app, "T.md", "typed");
+        assert_eq!(app.sheets_path(), Some(d.path().join("T.md")));
+        assert!(!app.dirty());
+        assert!(disk(d.path(), "T.md").ends_with("prose\ntyped"));
+
+        // No table: not handed over, and said so.
+        app.open_path("Plain.md", None, true);
+        assert_eq!(app.sheets_path(), None);
+        assert!(app.status.as_ref().is_some_and(|(m, err)| *err && m.contains("no tables")));
+
+        // In a conflict the disk copy is not what the window shows.
+        app.open_path("T.md", None, true);
+        let end = Pos::new(app.editor.buf.line_count() - 1, 0);
+        app.editor.edit(end, end, "mine", end);
+        changed_elsewhere(&mut app, d.path(), "T.md", TABLE_NOTE);
+        assert!(app.conflict);
+        assert_eq!(app.sheets_path(), None);
+        assert_eq!(disk(d.path(), "T.md"), TABLE_NOTE, "the conflict was not written over");
+    }
+
+    /// cce-sheets' save rewrites only the table's lines; the watcher brings
+    /// it back like any other write.
+    #[test]
+    fn a_sheets_save_reloads_a_clean_note_and_conflicts_a_dirty_one() {
+        let saved_by_sheets = TABLE_NOTE.replace("| Tea  | 3     |", "| Tea  | 5     |");
+        let (d, mut app) = app_over(&[("T.md", TABLE_NOTE)]);
+        app.open_path("T.md", None, true);
+        app.set_mode(Mode::Source);
+        changed_elsewhere(&mut app, d.path(), "T.md", &saved_by_sheets);
+        assert_eq!(app.editor_text(), saved_by_sheets);
+        assert!(!app.conflict && !app.dirty());
+
+        let (d, mut app) = app_over(&[("T.md", TABLE_NOTE)]);
+        open_and_type(&mut app, "T.md", "typed");
+        changed_elsewhere(&mut app, d.path(), "T.md", &saved_by_sheets);
+        assert!(app.conflict);
+        assert!(app.editor_text().ends_with("typed"), "the edits stay on screen");
     }
 }

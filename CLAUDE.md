@@ -27,6 +27,7 @@ proposal".
 | `mcp.rs` | MCP tools (`search`, `find_notes`, `read_note`, `backlinks`, `open_note`, `append_daily`, `current_note`) |
 | `images.rs` | Embedded images: link text → vault path → decode thread → upload; the lookup the reading view and the editor share |
 | `paste.rs` | Ctrl+V and drops of a picture or image files: what the clipboard / drop offers, storing into the attachment folder, where the embeds go |
+| `tables.rs` | Where the note's GFM tables are (line ranges), by cce-sheets' own rule — for "Edit tables in Sheets" |
 | `instance.rs` | The CLI's commands, on the single-instance socket `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock` (claim, forward and listener are `cce_ui::ipc::instance`) |
 
 ## Behaviour worth knowing before changing it
@@ -187,8 +188,9 @@ Keys come from input.kdl's `cce-notes` domain: `quick_switcher` (ctrl+o),
 source), `save` (ctrl+s), `reload` (ctrl+r), `back`
 (alt+arrowleft), `forward` (alt+arrowright), `toggle_tree` (ctrl+\\),
 `toggle_side` (ctrl+]), `search` (ctrl+shift+f), `rename` (f2), `graph`
-(ctrl+g: `cce-graph --vault <this vault> --local`, single-instance), `daily`
-(alt+d), `quit` (ctrl+q). Mouse back/forward walk the history too.
+(ctrl+g: `cce-graph --vault <this vault> --local`, single-instance), `sheets`
+(ctrl+shift+t: "Edit tables in Sheets", below), `daily` (alt+d), `quit`
+(ctrl+q). Mouse back/forward walk the history too.
 
 On the socket, `open <target>` takes everything after the verb as the
 target — a note may be called "Chapter 3" — and a line follows a tab
@@ -200,6 +202,30 @@ The instance socket also answers `current` (`ok <vault path>`) and
 `vault` (`ok <root>`) straight from its listener thread, from values the
 app keeps up to date (`instance::set_current`, `set_vault`) — cce-graph's
 local graph polls `current`.
+
+## Tables in cce-sheets
+
+"Edit tables in Sheets" — the `sheets` key (ctrl+shift+t), or a right-click
+over a table in either view — runs `cce-sheets <absolute note path>`
+detached: one sheet per table, named after the heading above it
+(cce-sheets' milestone 6). It is offered only when the note has a table by
+cce-sheets' own rule (`tables.rs` mirrors `cce-sheets/src/md.rs` `tables`;
+change both together), saves unsaved edits first since cce-sheets reads the
+file, and refuses in a conflict (the disk copy is not what the window shows).
+
+Nothing else is special about the round trip: cce-sheets' Save rewrites only
+the tables' lines and its write comes back through the watcher like any
+other — a clean buffer reloads, a dirty one is a conflict. Autosave (1.5 s)
+usually makes the buffer clean by the time Sheets saves; cce-sheets itself
+refuses to save a table that changed on disk since it opened it. The menu is
+the toolkit's `context_menu` with no target widget, so its row is dispatched
+here (`note_menu` holds the menu generation it was shown with), not through
+`context_menu::mouse_input`, which serves the text boxes' own menus.
+
+In a shadow, give cce-sheets its own MCP port too (`CCE_SHEETS_MCP_PORT=3903`
+in cce-notes' environment; the child inherits it) and drive its edits and
+Save through MCP — never ctrl+s/ctrl+o there on an untitled book (the portal
+opens on the live display).
 
 ## MCP
 
