@@ -2006,7 +2006,8 @@ impl Application for NotesApp {
     /// The reading view needs bold and italic faces of the DE's sans
     /// (Noto Sans by default), which the toolkit's bundle does not carry:
     /// without system fonts, `**bold**` fell back to a serif face. The
-    /// measuring FontSystem loads the same set ([`NotesApp::measure_fs`]).
+    /// layout's measure loads the same set (`ShapingMeasure::new(true)` in
+    /// `ensure_layout`).
     fn load_system_fonts(&self) -> bool {
         true
     }

@@ -19,7 +19,7 @@ proposal".
 | File | What it owns |
 | --- | --- |
 | `main.rs` | The `Application`: panes, modes, history, switcher + rename prompt, completion, autosave, conflicts, input; hosts the `DocEditor` |
-| `reading.rs` | Lays out `cce_vault::markdown::Block`s at a width into draw items + click targets |
+| `reading.rs` | Re-exports cce-ui's `widget::markdown` (the reading view's layout, shared with cce-grid's note cards) under the name the app uses |
 | `tree.rs` | The file tree's rows (folders first, case-insensitive, collapsible) |
 | `panel.rs` | The scrollable header/title/line list both side panes draw through |
 | `side.rs` | What the panes list: backlinks + unlinked mentions, outline, text and tag search |
@@ -146,35 +146,26 @@ still show as links.
   (`decode_slots`): a raster decodes at full size before it shrinks, and a
   note's embeds all ask at once.
 
-## The reading view (`reading.rs`)
+## The reading view
 
-cce-ui's text prim draws one run in one style, so a paragraph is laid out
-**word by word**: each word measured, wrapped greedily, and consecutive
-words of one look merged back into one prim. Things that were bugs once:
+The layout is cce-ui's `widget::markdown` (`MarkdownView`, behind its
+`markdown` feature), which cce-grid's note cards draw too; `reading.rs`
+only re-exports it. How it lays a paragraph out word by word, glues a
+word running across styles, converts its sRGB colours and draws bullets
+as discs is documented there — change it there, for both surfaces. What
+stays this app's to get right:
 
-- **Measure through the renderer's own shaping entry**
-  (`window_runner::get_text_buffer_attrs`) with a FontSystem that loads the
-  **same fonts** as the renderer. The app returns `load_system_fonts() =
-  true` because the DE sans (Noto Sans) has no bold/italic in the bundle —
-  without it `**bold**` fell back to a serif face — and `measure_fs` is
-  `create_font_system_with_system_fonts()` to match. Startup cost measured
-  at ~330 ms to first map.
-- **A word may span styles** (`` `code`, `` or `**bold**.`): `tokens()`
-  glues them so punctuation never starts a line on its own.
-- **Colours** for links, tags, highlights and callouts are written in sRGB
-  and pass through `lin()`; prims take linear colour. `TEXT_FG`/`TEXT_DIM`
-  are already linear.
-- **Bullets are `Dot`s (`pc.circle`)**, not small rounded rects: the
-  squircle corner shape draws a few-px radius as a square.
+- **Measure with the same fonts the renderer loads.** Laid-out widths
+  come from a `ShapingMeasure` (the renderer's own shaping entry with a
+  FontSystem of its own). The app returns `load_system_fonts() = true`
+  because the DE sans (Noto Sans) has no bold/italic in the bundle —
+  without it `**bold**` fell back to a serif face — so the measure is
+  made with `ShapingMeasure::new(true)` (`ensure_layout`) to match; a
+  mismatch puts every word at the wrong width. Startup cost measured at
+  ~330 ms to first map.
 - **Text cannot be hidden under a plate** (the glyph pass runs after all
   geometry), so the quick switcher simply stops painting the note and tree
   while it is open rather than registering a popover.
-
-This is the app-local first cut of the `MarkdownView` the proposal puts in
-cce-ui. Move it there when a second surface (grid note cards, graph hover
-previews) needs it, and then shape a whole paragraph as one rich-text
-buffer instead of a buffer per word (each word is a `BUFFER_CACHE` entry
-today, which a long note can churn).
 
 ## Commands
 
@@ -220,8 +211,10 @@ must move the port (`CCE_NOTES_MCP_PORT=3902`) — the live one holds 3002.
 
 ## Testing
 
-`cargo test -p cce-notes` covers layout (with a fixed-width `Measure`), the
-tree and the socket commands. Anything visual goes through a shadow at
+`cargo test -p cce-notes` covers the tree, the socket commands, completion,
+the side panes, pasting and image decoding, and the editor's save and
+conflict paths (`NotesApp::new` over a temp vault, no window). The reading
+view's layout is tested in cce-ui (`widget::markdown`). Anything visual goes through a shadow at
 `--scale 2` with `CCE_FONTS_DIR` set, against a **copy** of the vault
 (`CCE_VAULT=<copy>`) — never the live vault, which syncs to other devices.
 Fullscreen the window first (`ctl set-mode fullscreen cce-notes`): the
