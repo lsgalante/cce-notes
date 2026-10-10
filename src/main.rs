@@ -1555,7 +1555,7 @@ impl NotesApp {
         let active = if self.left_tab == LeftTab::Files { 0 } else { 1 };
         paint_tabs(pc, m.left_tabs, &["Files", "Search"], active);
         if self.left_tab == LeftTab::Search {
-            cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.search_input], pc);
+            cce_ui::widget::painter::paint_root_into(&self.ui_context, &self.ui_context[self.search_input], pc);
             if self.search_panel.items.is_empty() {
                 let (family, size) = cce_ui::layout::tree_font_parsed();
                 let b = m.tree_body;
@@ -1707,7 +1707,7 @@ impl NotesApp {
         let Some(sw) = &self.switcher else { return };
         let r = self.switcher_rect();
         pc.rounded_rect(r, 10.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_BG);
-        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.switcher_input], pc);
+        cce_ui::widget::painter::paint_root_into(&self.ui_context, &self.ui_context[self.switcher_input], pc);
         let (family, size) = cce_ui::layout::list_font_parsed();
         let top = r.y + switcher_rows_top();
         for (i, c) in sw.choices.iter().enumerate() {
