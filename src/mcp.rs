@@ -77,7 +77,7 @@ fn tools() -> Vec<McpTool> {
         ),
         tool(
             "current_note",
-            "What the window shows: the open note's path, the mode (reading or source) and whether it has unsaved edits.",
+            "What the window shows: the open note's path, the mode (reading or source), whether it has unsaved edits, and whether they conflict with the disk copy (changed, or deleted or moved, on disk).",
             json!({ "type": "object", "properties": {} }),
         ),
     ]
@@ -113,6 +113,7 @@ impl NotesApp {
                 "mode": if self.mode == crate::Mode::Source { "source" } else { "reading" },
                 "unsaved": self.dirty(),
                 "conflict": self.conflict,
+                "deleted_on_disk": self.gone,
             })),
             "open_note" => {
                 let path = self.resolve_note(str_arg(args, "note")?)?;

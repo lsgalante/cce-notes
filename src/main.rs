@@ -254,7 +254,15 @@ struct NotesApp {
     /// stays shut until the caret leaves that link.
     completion_dismissed: Option<(usize, usize)>,
 
+    /// The disk copy of the open note diverged from the buffer: autosave
+    /// stops and only Ctrl+S (keep mine) or Ctrl+R (load theirs) resolves
+    /// it. Also set, with `gone`, when the note vanished on disk.
     conflict: bool,
+    /// The open note was deleted or moved on disk. A save would recreate it
+    /// (`write_text` creates missing files): bringing back a note deleted
+    /// elsewhere, or duplicating one Obsidian renamed. So it is a conflict
+    /// too — only Ctrl+S writes it again, and Ctrl+R closes it.
+    gone: bool,
     status: Option<(String, bool)>,
 
     width: u32,
@@ -284,6 +292,84 @@ struct Metrics {
 }
 
 impl NotesApp {
+    /// The app over an opened vault (or the error opening it), showing no
+    /// note yet — `create` adds the instance listener, MCP and the startup
+    /// command; tests start here.
+    fn new(
+        index: Option<Index>,
+        vault_error: Option<String>,
+        watcher: Option<VaultWatcher>,
+        sender: calloop::channel::Sender<Message>,
+    ) -> NotesApp {
+        let images = images::Images::default();
+        let mut editor = DocEditor::new("", EditorTheme::new(READ_SIZE), true);
+        let shared = images.clone();
+        editor.set_images(Box::new(move |t| shared.lookup(t)));
+        editor.max_width = READ_MAX_W;
+        editor.pad = READ_PAD;
+        let switcher_input = TextBox::new(String::new()).with_placeholder("Find or create a note…");
+        let search_input = TextBox::new(String::new()).with_placeholder("Search");
+
+        // The context owns the widgets; the app keeps their handles.
+        let mut ui_context = cce_ui::context::UiContext::new();
+        let mut app = NotesApp {
+            keys: Keys::load(),
+            index,
+            vault_error,
+            _watcher: watcher,
+            tree: tree::Tree::default(),
+            rows: Vec::new(),
+            show_tree: true,
+            tree_scroll: 0.0,
+            tree_motion: ScrollMotion::new(),
+            tree_hover: None,
+            current: None,
+            saved: String::new(),
+            blocks: Vec::new(),
+            theme: Theme { body_font: "sans-serif".into(), mono_font: "monospace".into(), size: READ_SIZE },
+            layout: None,
+            measure: None,
+            mode: Mode::Reading,
+            read_scroll: 0.0,
+            read_motion: ScrollMotion::new(),
+            pending_line: None,
+            hover_hit: false,
+            saved_rev: editor.buf.revision,
+            edit_seen: editor.buf.revision,
+            editor,
+            images,
+            sender: sender.clone(),
+            seen_renderer: false,
+            edit_changed_at: Instant::now(),
+            history: Vec::new(),
+            hist_pos: 0,
+            switcher: None,
+            switcher_input: ui_context.insert(switcher_input),
+            left_tab: LeftTab::Files,
+            search_input: ui_context.insert(search_input),
+            search_panel: Panel::default(),
+            search_seen: String::new(),
+            show_side: true,
+            side_tab: SideTab::Backlinks,
+            side_panel: Panel::default(),
+            side_key: None,
+            side_dirty: true,
+            completion: None,
+            completion_dismissed: None,
+            conflict: false,
+            gone: false,
+            status: None,
+            width: 1000,
+            height: 700,
+            scale: 1.0,
+            needs_rebuild: true,
+            ui_context,
+            pointer: (0.0, 0.0),
+        };
+        app.rebuild_rows();
+        app
+    }
+
     fn metrics(&self) -> Metrics {
         let (w, h) = (self.width as f32, self.height as f32);
         let body_h = (h - BAND_H - STATUS_H).max(0.0);
@@ -361,6 +447,29 @@ impl NotesApp {
 
     // ---- notes -------------------------------------------------------
 
+    /// Write the buffer to `<name> (conflict <time>).md` beside the open
+    /// note, leaving the note itself as it is on disk. The path written.
+    fn write_conflict_copy(&mut self) -> Result<String, String> {
+        let text = self.editor_text();
+        let cur = self.current.clone().ok_or("no note is open")?;
+        let ix = self.index.as_mut().ok_or("no vault")?;
+        let (dir, file) = match cur.rsplit_once('/') {
+            Some((d, f)) => (format!("{d}/"), f),
+            None => (String::new(), cur.as_str()),
+        };
+        let stem = file.strip_suffix(".md").unwrap_or(file);
+        let when = chrono::Local::now().format("%Y-%m-%d %H%M%S");
+        for n in 1.. {
+            let suffix = if n == 1 { String::new() } else { format!(" {n}") };
+            match ix.create(&format!("{dir}{stem} (conflict {when}{suffix}).md"), &text) {
+                Ok(path) => return Ok(path),
+                Err(cce_vault::WriteError::Exists(_)) => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        unreachable!()
+    }
+
     /// Show `text` as the current note's content, as on disk.
     fn load_text(&mut self, text: String) {
         self.images.note_changed();
@@ -373,8 +482,18 @@ impl NotesApp {
         self.edit_seen = self.saved_rev;
         self.saved = text;
         self.conflict = false;
+        self.gone = false;
         self.side_dirty = true;
         self.invalidate();
+    }
+
+    /// What the status line says while a conflict holds.
+    fn conflict_hint(&self) -> &'static str {
+        if self.gone {
+            "Deleted or moved on disk · Ctrl+S saves yours again · Ctrl+R closes it"
+        } else {
+            "Changed on disk · Ctrl+S keeps yours · Ctrl+R reloads"
+        }
     }
 
     /// Write the source buffer if it differs from disk.
@@ -389,6 +508,13 @@ impl NotesApp {
         }
         let text = self.editor_text();
         let rev = self.editor.buf.revision;
+        if self.conflict && !force {
+            // Only Ctrl+S ("keep mine") writes over a conflict. Every other
+            // save — leaving for reading view, a rename — used to land here
+            // and overwrite the disk copy without a word.
+            self.set_status(self.conflict_hint(), true);
+            return false;
+        }
         if text == self.saved && !force {
             // Edited back to what is on disk: nothing to write.
             self.saved_rev = rev;
@@ -400,6 +526,7 @@ impl NotesApp {
                 self.saved = text;
                 self.saved_rev = rev;
                 self.conflict = false;
+                self.gone = false;
                 true
             }
             Err(e) => {
@@ -424,14 +551,25 @@ impl NotesApp {
                 return;
             }
         }
-        if self.current.as_deref() != Some(path) {
-            if self.conflict {
-                self.set_status("Resolve the conflict first: Ctrl+S keeps yours, Ctrl+R loads the disk copy", true);
-                return;
+        if self.current.as_deref() == Some(path) {
+            // Already open — a click on it in the tree, a search hit or
+            // backlink in it, a self-link, cce-graph, `cce-notes <it>`. This
+            // used to read the file again over the buffer: the typing since
+            // the last autosave was lost, and in a conflict all of it.
+            // Reloading on purpose is Ctrl+R (`reload`).
+            if let Some(l) = line {
+                self.goto_line(l);
             }
-            if !self.save() {
-                return;
-            }
+            self.tree.reveal(path);
+            self.rebuild_rows();
+            return;
+        }
+        if self.conflict && self.dirty() {
+            self.set_status("Resolve the conflict first: Ctrl+S keeps yours, Ctrl+R loads the disk copy", true);
+            return;
+        }
+        if !self.save() {
+            return;
         }
         let Some(ix) = &self.index else { return };
         let text = match ix.read_text(path) {
@@ -441,14 +579,11 @@ impl NotesApp {
                 return;
             }
         };
-        let same = self.current.as_deref() == Some(path);
         self.current = Some(path.to_string());
         instance::set_current(Some(path));
         self.load_text(text);
-        if !same {
-            self.read_scroll = 0.0;
-            self.read_motion = ScrollMotion::new();
-        }
+        self.read_scroll = 0.0;
+        self.read_motion = ScrollMotion::new();
         if let Some(l) = line {
             self.goto_line(l);
         }
@@ -461,6 +596,32 @@ impl NotesApp {
             }
             self.hist_pos = self.history.len() - 1;
         }
+        self.status = None;
+    }
+
+    /// Ctrl+R: the disk copy over the buffer — what a conflict's "load
+    /// theirs" means, so unsaved edits go. A note gone from disk closes.
+    fn reload(&mut self) {
+        let (Some(cur), Some(ix)) = (self.current.clone(), self.index.as_ref()) else { return };
+        match ix.read_text(&cur) {
+            Ok(text) => {
+                let scroll = self.read_scroll;
+                self.load_text(text);
+                self.read_scroll = scroll;
+                self.status = None;
+            }
+            Err(_) if self.gone => self.close_note(),
+            Err(e) => self.set_status(format!("Could not read {cur}: {e}"), true),
+        }
+    }
+
+    /// Show no note (the one open is gone and its edits were given up).
+    fn close_note(&mut self) {
+        self.current = None;
+        instance::set_current(None);
+        self.load_text(String::new());
+        self.mode = Mode::Reading;
+        self.read_scroll = 0.0;
         self.status = None;
     }
 
@@ -643,8 +804,14 @@ impl NotesApp {
             return;
         }
         match ix.read_text(&cur) {
-            Ok(disk) if disk == self.saved => {}
+            // Back to what we last read or wrote (or back from gone): no
+            // divergence left.
+            Ok(disk) if disk == self.saved => {
+                self.conflict = false;
+                self.gone = false;
+            }
             Ok(disk) => {
+                self.gone = false;
                 if self.dirty() {
                     self.conflict = true;
                 } else {
@@ -653,7 +820,12 @@ impl NotesApp {
                     self.read_scroll = scroll;
                 }
             }
-            Err(_) => self.set_status(format!("{cur} was deleted or moved on disk"), true),
+            // Deleted or moved: hold every save (see `gone`), dirty or not —
+            // a clean buffer typed into later would recreate it too.
+            Err(_) => {
+                self.gone = true;
+                self.conflict = true;
+            }
         }
     }
 
@@ -1234,7 +1406,7 @@ impl NotesApp {
         let inset = cce_ui::layout::root_plate_inset();
         let ty = cce_ui::layout::align_text_y(y, STATUS_H, size, 0.0);
         let (msg, color) = if self.conflict {
-            ("Changed on disk · Ctrl+S keeps yours · Ctrl+R reloads".to_string(), CONFLICT)
+            (self.conflict_hint().to_string(), CONFLICT)
         } else if let Some((msg, err)) = &self.status {
             (msg.clone(), if *err { CONFLICT } else { DIM })
         } else if let (Some(cur), Some(ix)) = (&self.current, &self.index) {
@@ -1615,73 +1787,7 @@ impl Application for NotesApp {
             mcp::start(sender.clone());
         }
         let _ = sender.send(Message::Command(startup.command.clone()));
-
-        let images = images::Images::default();
-        let mut editor = DocEditor::new("", EditorTheme::new(READ_SIZE), true);
-        let shared = images.clone();
-        editor.set_images(Box::new(move |t| shared.lookup(t)));
-        editor.max_width = READ_MAX_W;
-        editor.pad = READ_PAD;
-        let switcher_input = TextBox::new(String::new()).with_placeholder("Find or create a note…");
-        let search_input = TextBox::new(String::new()).with_placeholder("Search");
-
-        // The context owns the widgets; the app keeps their handles.
-        let mut ui_context = cce_ui::context::UiContext::new();
-        let mut app = NotesApp {
-            keys: Keys::load(),
-            index,
-            vault_error,
-            _watcher: watcher,
-            tree: tree::Tree::default(),
-            rows: Vec::new(),
-            show_tree: true,
-            tree_scroll: 0.0,
-            tree_motion: ScrollMotion::new(),
-            tree_hover: None,
-            current: None,
-            saved: String::new(),
-            blocks: Vec::new(),
-            theme: Theme { body_font: "sans-serif".into(), mono_font: "monospace".into(), size: READ_SIZE },
-            layout: None,
-            measure: None,
-            mode: Mode::Reading,
-            read_scroll: 0.0,
-            read_motion: ScrollMotion::new(),
-            pending_line: None,
-            hover_hit: false,
-            saved_rev: editor.buf.revision,
-            edit_seen: editor.buf.revision,
-            editor,
-            images,
-            sender: sender.clone(),
-            seen_renderer: false,
-            edit_changed_at: Instant::now(),
-            history: Vec::new(),
-            hist_pos: 0,
-            switcher: None,
-            switcher_input: ui_context.insert(switcher_input),
-            left_tab: LeftTab::Files,
-            search_input: ui_context.insert(search_input),
-            search_panel: Panel::default(),
-            search_seen: String::new(),
-            show_side: true,
-            side_tab: SideTab::Backlinks,
-            side_panel: Panel::default(),
-            side_key: None,
-            side_dirty: true,
-            completion: None,
-            completion_dismissed: None,
-            conflict: false,
-            status: None,
-            width: 1000,
-            height: 700,
-            scale: 1.0,
-            needs_rebuild: true,
-            ui_context,
-            pointer: (0.0, 0.0),
-        };
-        app.rebuild_rows();
-        app
+        NotesApp::new(index, vault_error, watcher, sender)
     }
 
     fn settings(&self) -> WindowSettings {
@@ -1893,6 +1999,13 @@ impl Application for NotesApp {
     fn on_exit(&mut self) {
         if !self.conflict {
             self.save();
+        } else if self.dirty() {
+            // A conflict cannot be asked about on the way out, and neither
+            // copy may silently win: keep ours beside the note.
+            match self.write_conflict_copy() {
+                Ok(path) => log::warn!("unsaved edits kept in {path} (the note changed on disk)"),
+                Err(e) => log::error!("could not keep the unsaved edits: {e}"),
+            }
         }
         if let Some(ix) = self.index.as_mut() {
             let _ = ix.save_cache();
@@ -2218,12 +2331,7 @@ impl Application for NotesApp {
                 return None;
             }
             if k(&self.keys.reload) {
-                if let Some(cur) = self.current.clone() {
-                    let mode = self.mode;
-                    self.mode = Mode::Reading;
-                    self.open_path(&cur, None, false);
-                    self.mode = mode;
-                }
+                self.reload();
                 return None;
             }
             if k(&self.keys.back) {
@@ -2376,4 +2484,151 @@ fn main() {
     let _ = STARTUP.set(Startup { vault, command });
     cce_ui::engine::run::<NotesApp>();
     instance::cleanup();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The app over a temp vault holding `files`, editing nothing yet.
+    fn app_over(files: &[(&str, &str)]) -> (tempfile::TempDir, NotesApp) {
+        let dir = tempfile::tempdir().unwrap();
+        for (p, t) in files {
+            let abs = dir.path().join(p);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, t).unwrap();
+        }
+        let ix = Index::open(dir.path(), false).unwrap();
+        let (tx, _rx) = calloop::channel::channel();
+        (dir, NotesApp::new(Some(ix), None, None, tx))
+    }
+
+    /// Open `path` in the editor and type `text` at its end, unsaved.
+    fn open_and_type(app: &mut NotesApp, path: &str, text: &str) {
+        app.open_path(path, None, true);
+        app.set_mode(Mode::Source);
+        let last = app.editor.buf.line_count() - 1;
+        let end = Pos::new(last, app.editor.buf.line(last).len());
+        app.editor.edit(end, end, text, end);
+        assert!(app.dirty());
+    }
+
+    /// Something else writes the note, and the watcher reports it.
+    fn changed_elsewhere(app: &mut NotesApp, dir: &Path, path: &str, text: &str) {
+        let abs = dir.join(path);
+        std::fs::write(&abs, text).unwrap();
+        app.vault_changed(vec![abs]);
+    }
+
+    fn disk(dir: &Path, path: &str) -> String {
+        std::fs::read_to_string(dir.join(path)).unwrap()
+    }
+
+    #[test]
+    fn opening_the_open_note_keeps_what_was_typed() {
+        let (_d, mut app) = app_over(&[("A.md", "one\ntwo\n")]);
+        open_and_type(&mut app, "A.md", "typed");
+        // A click on it in the tree, a search hit in it, cce-graph...
+        app.open_path("A.md", Some(1), true);
+        assert!(app.editor_text().ends_with("typed"), "the buffer was reloaded from disk");
+        assert!(app.dirty());
+        assert_eq!(app.editor.buf.caret.line, 1, "a line still goes there");
+    }
+
+    #[test]
+    fn a_conflict_is_never_overwritten_by_reading_view_rename_or_reopen() {
+        let (d, mut app) = app_over(&[("A.md", "base\n")]);
+        open_and_type(&mut app, "A.md", "mine");
+        changed_elsewhere(&mut app, d.path(), "A.md", "theirs\n");
+        assert!(app.conflict);
+
+        app.set_mode(Mode::Reading);
+        assert_eq!(disk(d.path(), "A.md"), "theirs\n", "Ctrl+E wrote over the disk copy");
+        assert_eq!(app.mode, Mode::Source, "it stays in the editor until resolved");
+
+        app.rename("A.md", "B.md");
+        assert_eq!(disk(d.path(), "A.md"), "theirs\n", "a rename wrote over the disk copy");
+        assert!(!d.path().join("B.md").exists());
+
+        app.open_path("A.md", None, true);
+        assert!(app.editor_text().ends_with("mine"), "reopening discarded ours");
+
+        // Ctrl+R: theirs, on purpose.
+        app.reload();
+        assert_eq!(app.editor_text(), "theirs\n");
+        assert!(!app.conflict && !app.dirty());
+
+        // Ctrl+S in a conflict: ours, on purpose.
+        open_and_type(&mut app, "A.md", "again");
+        changed_elsewhere(&mut app, d.path(), "A.md", "theirs 2\n");
+        assert!(app.save_now(app.conflict));
+        assert!(disk(d.path(), "A.md").ends_with("again"));
+        assert!(!app.conflict);
+    }
+
+    #[test]
+    fn a_note_deleted_on_disk_is_not_written_back() {
+        let (d, mut app) = app_over(&[("A.md", "base\n"), ("B.md", "b\n")]);
+        open_and_type(&mut app, "A.md", "mine");
+        let abs = d.path().join("A.md");
+        std::fs::remove_file(&abs).unwrap();
+        app.vault_changed(vec![abs.clone()]);
+        assert!(app.gone && app.conflict);
+
+        // What autosave and leaving for reading view do: nothing.
+        assert!(!app.save());
+        app.set_mode(Mode::Reading);
+        assert!(!abs.exists(), "the deleted note came back");
+
+        // Clean, it may be left; typed into, it still is not recreated.
+        app.load_text("base\n".into());
+        app.gone = true;
+        app.conflict = true;
+        let end = Pos::new(1, 0);
+        app.editor.edit(end, end, "later", end);
+        assert!(!app.save());
+        assert!(!abs.exists());
+
+        // Ctrl+S brings it back on purpose; Ctrl+R closes it.
+        assert!(app.save_now(true));
+        assert!(abs.exists() && !app.gone);
+        std::fs::remove_file(&abs).unwrap();
+        app.vault_changed(vec![abs.clone()]);
+        app.reload();
+        assert_eq!(app.current, None);
+        assert!(!abs.exists());
+
+        // A note that returns (a sync's delete then write) clears it.
+        open_and_type(&mut app, "B.md", "x");
+        let b = d.path().join("B.md");
+        std::fs::remove_file(&b).unwrap();
+        app.vault_changed(vec![b.clone()]);
+        assert!(app.gone);
+        std::fs::write(&b, "b\n").unwrap();
+        app.vault_changed(vec![b]);
+        assert!(!app.gone && !app.conflict);
+    }
+
+    #[test]
+    fn quitting_in_a_conflict_keeps_ours_as_a_copy() {
+        let (d, mut app) = app_over(&[("dir/A.md", "base\n")]);
+        open_and_type(&mut app, "dir/A.md", "mine");
+        changed_elsewhere(&mut app, d.path(), "dir/A.md", "theirs\n");
+        app.on_exit();
+        assert_eq!(disk(d.path(), "dir/A.md"), "theirs\n", "theirs is left as it is");
+        let copies: Vec<String> = std::fs::read_dir(d.path().join("dir"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("A (conflict "))
+            .collect();
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert!(disk(d.path(), &format!("dir/{}", copies[0])).ends_with("mine"));
+
+        // Without a conflict, exit saves as before and makes no copy.
+        let (d, mut app) = app_over(&[("B.md", "base\n")]);
+        open_and_type(&mut app, "B.md", "mine");
+        app.on_exit();
+        assert!(disk(d.path(), "B.md").ends_with("mine"));
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().filter(|e| e.as_ref().unwrap().path().is_file()).count(), 1);
+    }
 }

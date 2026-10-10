@@ -35,8 +35,21 @@ proposal".
   embeds an `Index` and a `VaultWatcher`. A watcher batch that touches the
   open note reloads it silently when the buffer is clean, and raises a
   **conflict** when it is dirty: autosave stops, Ctrl+S writes ours over
-  the disk copy, Ctrl+R loads theirs. Never overwrite a dirty conflict
-  silently — Obsidian or Dropbox may be writing the same file.
+  the disk copy, Ctrl+R loads theirs (`reload`). Never overwrite a dirty
+  conflict silently — Obsidian or Dropbox may be writing the same file.
+  `save_now` enforces it for every caller: in a conflict only a forced
+  save (Ctrl+S) writes, so leaving for reading view or renaming is
+  refused with the hint instead of winning for us. Quitting in a conflict
+  keeps ours as `<name> (conflict <time>).md` beside the note
+  (`write_conflict_copy`) — there is no close prompt to ask with.
+- **A note deleted or moved on disk is a conflict too** (`gone`):
+  `write_text` creates missing files, so an ordinary save would bring back
+  a note deleted elsewhere or duplicate one Obsidian renamed. Only Ctrl+S
+  writes it again; Ctrl+R closes it; its return (a sync's delete then
+  write) clears it.
+- **Opening the note already open never reloads it** — a tree click, a
+  search hit or backlink in it, a self-link, cce-graph, `cce-notes <it>`
+  only go to the line. Reloading over the buffer is Ctrl+R alone.
 - **Our own writes come back through the watcher.** They are recognised by
   comparing the disk text with `saved` (the last text read or written), not
   by timing.
