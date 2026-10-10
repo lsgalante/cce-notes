@@ -418,7 +418,9 @@ impl NotesApp {
             Some(_) => {
                 // Canvases and attachments open in their own apps.
                 let abs = ix.abs(path);
-                let _ = std::process::Command::new("xdg-open").arg(abs).spawn();
+                let mut open = std::process::Command::new("xdg-open");
+                open.arg(abs);
+                let _ = spawn_detached(open);
                 return;
             }
         }
@@ -515,7 +517,9 @@ impl NotesApp {
                 }
             }
             SpanLink::Url(url) => {
-                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                let mut open = std::process::Command::new("xdg-open");
+                open.arg(url);
+                let _ = spawn_detached(open);
             }
             SpanLink::Tag(tag) => self.open_search(&format!("#{tag}")),
         }
@@ -1492,6 +1496,18 @@ impl NotesApp {
     }
 }
 
+/// Spawn `cmd` and reap it on a background thread, so the child never lingers
+/// as a zombie once it exits. The same helper cce-mail, cce-files, cce-terminal
+/// and cce-system-interface each keep; cce-ui's shared `process::spawn_detached`
+/// went away in cce-ui 4e94236.
+fn spawn_detached(mut cmd: std::process::Command) -> std::io::Result<()> {
+    let mut child = cmd.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Equal-width text tabs across `r`, the active one underlined.
 fn paint_tabs(pc: &mut PaintCtx, r: Rect, labels: &[&str], active: usize) {
     if r.width <= 0.0 {
@@ -2255,7 +2271,7 @@ impl Application for NotesApp {
                     cmd.arg(v);
                 }
                 cmd.arg("--local");
-                if let Err(e) = cmd.spawn() {
+                if let Err(e) = spawn_detached(cmd) {
                     self.set_status(format!("Could not start cce-graph: {e}"), true);
                 }
                 return None;
