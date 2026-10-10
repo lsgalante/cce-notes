@@ -150,10 +150,10 @@ impl Panel {
                 let x = r.x + 6.0 + item.depth as f32 * INDENT;
                 let bounds = Some([x, r.y.max(area.y), r.x + r.width - 4.0, (r.y + r.height).min(area.y + area.height)]);
                 let (font, fsize, color, attrs) = match item.kind {
-                    Kind::Header => (family.clone(), small, cce_ui::colors::TEXT_DIM, TextAttrs::default()),
-                    Kind::Title => (family.clone(), size, cce_ui::colors::TEXT_FG, TextAttrs::default()),
-                    Kind::Line => (body.clone(), small, cce_ui::colors::TEXT_FG, TextAttrs::default()),
-                    Kind::Note => (body.clone(), small, cce_ui::colors::TEXT_DIM, TextAttrs { italic: true, weight: None, ..Default::default() }),
+                    Kind::Header => (family.clone(), small, cce_ui::color::TEXT_DIM, TextAttrs::default()),
+                    Kind::Title => (family.clone(), size, cce_ui::color::TEXT_FG, TextAttrs::default()),
+                    Kind::Line => (body.clone(), small, cce_ui::color::TEXT_FG, TextAttrs::default()),
+                    Kind::Note => (body.clone(), small, cce_ui::color::TEXT_DIM, TextAttrs { italic: true, weight: None, ..Default::default() }),
                 };
                 let ty = cce_ui::layout::align_text_y(r.y, r.height, fsize, 0.0);
                 pc.text_attrs(item.text.clone(), x, ty, fsize, srgb_u8(color), Some(font), bounds, attrs);

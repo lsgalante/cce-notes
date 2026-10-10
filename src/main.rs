@@ -70,8 +70,8 @@ const COMPLETE_ROW_H: f32 = 24.0;
 /// Editing saves once typing has paused this long.
 const AUTOSAVE_AFTER: Duration = Duration::from_millis(1500);
 
-const FG: [f32; 4] = cce_ui::colors::TEXT_FG;
-const DIM: [f32; 4] = cce_ui::colors::TEXT_DIM;
+const FG: [f32; 4] = cce_ui::color::TEXT_FG;
+const DIM: [f32; 4] = cce_ui::color::TEXT_DIM;
 const ROW_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.05];
 const ROW_CURRENT: [f32; 4] = [1.0, 1.0, 1.0, 0.10];
 const CONFLICT: [f32; 4] = [0.95, 0.45, 0.35, 1.0];
@@ -1481,7 +1481,7 @@ impl NotesApp {
                     let side = (size * 0.45).round().max(4.0);
                     let dot = Rect { x: inset + dir_w + name_w + size * 0.5, y: (BAND_H - side) / 2.0, width: side, height: side };
                     if dot.x + dot.width <= right {
-                        pc.icon("circle", dot, cce_ui::colors::to_srgb(FG));
+                        pc.icon("circle", dot, cce_ui::color::to_srgb(FG));
                     }
                 }
             }
@@ -1594,7 +1594,7 @@ impl NotesApp {
                 let color = if row.folder {
                     let side = (size * 0.9).round();
                     let chevron = Rect { x, y: r.y + (r.height - side) / 2.0, width: side, height: side };
-                    pc.icon(if row.open { "chevron-down" } else { "chevron-right" }, chevron, cce_ui::colors::to_srgb(DIM));
+                    pc.icon(if row.open { "chevron-down" } else { "chevron-right" }, chevron, cce_ui::color::to_srgb(DIM));
                     DIM
                 } else {
                     FG
@@ -1706,14 +1706,14 @@ impl NotesApp {
     fn paint_switcher(&self, pc: &mut PaintCtx) {
         let Some(sw) = &self.switcher else { return };
         let r = self.switcher_rect();
-        pc.rounded_rect(r, 10.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_BG);
+        pc.rounded_rect(r, 10.0, (true, true, true, true), cce_ui::color::PANEL_MENU_BG);
         cce_ui::widget::painter::paint_root_into(&self.ui_context, &self.ui_context[self.switcher_input], pc);
         let (family, size) = cce_ui::layout::list_font_parsed();
         let top = r.y + switcher_rows_top();
         for (i, c) in sw.choices.iter().enumerate() {
             let row = Rect { x: r.x + 6.0, y: top + i as f32 * SWITCHER_ROW_H, width: r.width - 12.0, height: SWITCHER_ROW_H };
             if i == sw.selected {
-                pc.rounded_rect(row, 5.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_HOVER);
+                pc.rounded_rect(row, 5.0, (true, true, true, true), cce_ui::color::PANEL_MENU_HOVER);
             }
             let (label, color, alias) = match c {
                 Choice::Note { path, alias } => (path.trim_end_matches(".md").to_string(), FG, alias.as_deref()),
@@ -1730,7 +1730,7 @@ impl NotesApp {
                 let ax = row.x + 10.0 + lw + size * 0.6;
                 let arrow = Rect { x: ax, y: row.y + (row.height - side) / 2.0, width: side, height: side };
                 if arrow.x + arrow.width < row.x + row.width - 6.0 {
-                    pc.icon("arrow-left", arrow, cce_ui::colors::to_srgb(DIM));
+                    pc.icon("arrow-left", arrow, cce_ui::color::to_srgb(DIM));
                 }
                 let tx = ax + side + size * 0.4;
                 pc.text_with(alias.to_string(), tx, ty, size, srgb_u8(DIM), Some(family.clone()), bounds);
@@ -1763,12 +1763,12 @@ impl NotesApp {
 
     fn paint_completion(&self, pc: &mut PaintCtx, r: Rect) {
         let Some(c) = &self.completion else { return };
-        pc.rounded_rect(r, 8.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_BG);
+        pc.rounded_rect(r, 8.0, (true, true, true, true), cce_ui::color::PANEL_MENU_BG);
         let (family, size) = cce_ui::layout::list_font_parsed();
         for (i, path) in c.choices.iter().enumerate() {
             let row = Rect { x: r.x + 4.0, y: r.y + 4.0 + i as f32 * COMPLETE_ROW_H, width: r.width - 8.0, height: COMPLETE_ROW_H };
             if i == c.selected {
-                pc.rounded_rect(row, 5.0, (true, true, true, true), cce_ui::colors::PANEL_MENU_HOVER);
+                pc.rounded_rect(row, 5.0, (true, true, true, true), cce_ui::color::PANEL_MENU_HOVER);
             }
             let (dir, file) = match path.rsplit_once('/') {
                 Some((d, f)) => (Some(d), f),
@@ -1808,7 +1808,7 @@ fn paint_tabs(pc: &mut PaintCtx, r: Rect, labels: &[&str], active: usize) {
         );
         if i == active {
             let u = Rect { x: cell.x + 14.0, y: cell.y + cell.height - 3.0, width: (cell.width - 28.0).max(4.0), height: 2.0 };
-            pc.rounded_rect(u, 1.0, (true, true, true, true), cce_ui::colors::to_linear([0.66, 0.55, 0.98, 1.0]));
+            pc.rounded_rect(u, 1.0, (true, true, true, true), cce_ui::color::to_linear([0.66, 0.55, 0.98, 1.0]));
         }
     }
 }
