@@ -442,7 +442,7 @@ version = "0.1.0"
 dependencies = [
  "calloop",
  "cce-ui",
- "cce-vault 0.1.0 (git+https://github.com/lsgalante/cce-vault.git?rev=acf0e24b015812bd9a83022085cc78cfa9acd766)",
+ "cce-vault",
  "chrono",
  "env_logger",
  "image",
@@ -457,7 +457,7 @@ dependencies = [
 [[package]]
 name = "cce-ui"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-ui.git?rev=bc967d94b6dea65465fd342610ee1705c684257a#bc967d94b6dea65465fd342610ee1705c684257a"
+source = "git+https://github.com/lsgalante/cce-ui.git?rev=87946f19f68852c78339ba5f852cda02b56b68a6#87946f19f68852c78339ba5f852cda02b56b68a6"
 dependencies = [
  "accesskit",
  "ash",
@@ -466,7 +466,7 @@ dependencies = [
  "calloop",
  "calloop-wayland-source",
  "cce-core",
- "cce-vault 0.1.0 (git+https://github.com/lsgalante/cce-vault.git?rev=3d8130142469b9a1c7941a3bd3d6da3eeb79be2a)",
+ "cce-vault",
  "cosmic-text",
  "cursor-icon",
  "dispatch2",
@@ -498,24 +498,6 @@ dependencies = [
  "web-sys",
  "web-time",
  "xkeysym",
-]
-
-[[package]]
-name = "cce-vault"
-version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-vault.git?rev=3d8130142469b9a1c7941a3bd3d6da3eeb79be2a#3d8130142469b9a1c7941a3bd3d6da3eeb79be2a"
-dependencies = [
- "chrono",
- "indexmap",
- "kdl",
- "log",
- "notify",
- "percent-encoding",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "walkdir",
- "yaml-rust2",
 ]
 
 [[package]]
