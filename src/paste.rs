@@ -45,24 +45,34 @@ pub fn from_drop(mime: &str, data: &[u8]) -> Option<Clip> {
     None
 }
 
+/// The clipboard's owner did not answer within [`PASTE_TIMEOUT`].
+#[derive(Debug, PartialEq)]
+pub struct Unanswered;
+
 /// What on the clipboard a paste should turn into attachments, if anything.
-pub fn read() -> Option<Clip> {
-    let types = wl_paste(&["--list-types"])?;
-    let types: Vec<&str> = std::str::from_utf8(&types).ok()?.lines().map(str::trim).collect();
+/// `Err` when the clipboard did not answer: the caller must not fall back
+/// to the text paste then — cce-ui's text read waits on the same owner
+/// with no deadline, so Ctrl+V froze the window anyway (measured: 2 s
+/// here, then the whole hang there).
+pub fn read() -> Result<Option<Clip>, Unanswered> {
+    let Some(types) = wl_paste(&["--list-types"])? else { return Ok(None) };
+    let Ok(types) = std::str::from_utf8(&types) else { return Ok(None) };
+    let types: Vec<&str> = types.lines().map(str::trim).collect();
     log::debug!("paste: clipboard offers {types:?}");
     // Copied files first: a file manager offers their paths as text/plain
     // too. A list naming no local image (a browser's copied link) falls
     // through to the text paste.
     if types.contains(&"text/uri-list") {
-        let list = wl_paste(&["--type", "text/uri-list"])?;
-        let files = image_files(&String::from_utf8_lossy(&list));
-        if !files.is_empty() {
-            return Some(Clip::Files(files));
+        if let Some(list) = wl_paste(&["--type", "text/uri-list"])? {
+            let files = image_files(&String::from_utf8_lossy(&list));
+            if !files.is_empty() {
+                return Ok(Some(Clip::Files(files)));
+            }
         }
     }
-    let (mime, ext) = image_offer(&types)?;
-    let bytes = wl_paste(&["--type", mime])?;
-    (!bytes.is_empty()).then_some(Clip::Image { bytes, ext })
+    let Some((mime, ext)) = image_offer(&types) else { return Ok(None) };
+    let Some(bytes) = wl_paste(&["--type", mime])? else { return Ok(None) };
+    Ok((!bytes.is_empty()).then_some(Clip::Image { bytes, ext }))
 }
 
 /// The picture type to take, if any. Only when no plain text is offered
@@ -90,24 +100,28 @@ fn image_files(list: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn wl_paste(args: &[&str]) -> Option<Vec<u8>> {
+/// `wl-paste` with `args`: its output, `Ok(None)` when it fails (nothing of
+/// that type, no clipboard, no wl-paste), `Err` when it did not answer.
+fn wl_paste(args: &[&str]) -> Result<Option<Vec<u8>>, Unanswered> {
     let mut cmd = Command::new("wl-paste");
     cmd.args(args);
     let out = output_within(cmd, PASTE_TIMEOUT);
-    if out.is_none() {
-        log::debug!("paste: wl-paste {args:?} failed or timed out");
+    if !matches!(out, Ok(Some(_))) {
+        log::debug!("paste: wl-paste {args:?}: {out:?}");
     }
     out
 }
 
-/// Run `cmd` and collect its stdout, or `None` when it fails or takes past
-/// `limit` (then it is killed). The output is read on its own thread: a
-/// picture larger than the pipe would otherwise hold the child mid-write
-/// until the deadline, and look like a hang.
-fn output_within(mut cmd: Command, limit: Duration) -> Option<Vec<u8>> {
+/// Run `cmd` and collect its stdout: `Ok(None)` when it fails, `Err` when it
+/// takes past `limit` (then it is killed). The output is read on its own
+/// thread: a picture larger than the pipe would otherwise hold the child
+/// mid-write until the deadline, and look like a hang.
+fn output_within(mut cmd: Command, limit: Duration) -> Result<Option<Vec<u8>>, Unanswered> {
     let deadline = Instant::now() + limit;
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
+    let Ok(mut child) = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
+        return Ok(None);
+    };
+    let Some(mut stdout) = child.stdout.take() else { return Ok(None) };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -117,9 +131,9 @@ fn output_within(mut cmd: Command, limit: Duration) -> Option<Vec<u8>> {
     let Ok(bytes) = rx.recv_timeout(limit) else {
         let _ = child.kill();
         let _ = child.wait();
-        return None;
+        return Err(Unanswered);
     };
-    exit_by(&mut child, deadline)?.success().then_some(bytes)
+    Ok(exit_by(&mut child, deadline).ok_or(Unanswered)?.success().then_some(bytes))
 }
 
 /// The child's exit status once it exits, or `None` (killing it) when it
@@ -192,12 +206,14 @@ mod tests {
             c
         };
         let started = Instant::now();
-        assert_eq!(output_within(sh("sleep 10"), Duration::from_millis(200)), None);
+        assert_eq!(output_within(sh("sleep 10"), Duration::from_millis(200)), Err(Unanswered));
         assert!(started.elapsed() < Duration::from_secs(2), "it waited for the child");
-        assert_eq!(output_within(sh("printf hi"), PASTE_TIMEOUT).as_deref(), Some(&b"hi"[..]));
-        assert_eq!(output_within(sh("echo x; exit 1"), PASTE_TIMEOUT), None);
+        assert_eq!(output_within(sh("printf hi"), PASTE_TIMEOUT), Ok(Some(b"hi".to_vec())));
+        // A failure is an answer: the text paste may still run.
+        assert_eq!(output_within(sh("echo x; exit 1"), PASTE_TIMEOUT), Ok(None));
+        assert_eq!(output_within(Command::new("/nonexistent/wl-paste"), PASTE_TIMEOUT), Ok(None));
         // Larger than a pipe holds: read as it comes, not mistaken for a hang.
-        let big = output_within(sh("head -c 1000000 /dev/zero"), PASTE_TIMEOUT).unwrap();
+        let big = output_within(sh("head -c 1000000 /dev/zero"), PASTE_TIMEOUT).unwrap().unwrap();
         assert_eq!(big.len(), 1_000_000);
     }
 

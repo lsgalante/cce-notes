@@ -1138,14 +1138,24 @@ impl NotesApp {
     /// Ctrl+V with a picture (or copied image files) on the clipboard: save
     /// them in the vault's attachment folder for this note, as Obsidian
     /// does, and embed them at the caret, each on its own line. False when
-    /// the clipboard holds nothing of the kind (the text paste runs).
+    /// the clipboard holds nothing of the kind (the text paste runs); true,
+    /// with a status, when it did not answer at all.
     fn paste_images(&mut self) -> bool {
         if self.index.is_none() || self.current.is_none() {
             return false;
         }
-        let Some(clip) = paste::read() else {
-            log::debug!("paste: nothing to attach, pasting text");
-            return false;
+        let clip = match paste::read() {
+            Ok(Some(clip)) => clip,
+            Ok(None) => {
+                log::debug!("paste: nothing to attach, pasting text");
+                return false;
+            }
+            // Taken, not passed on: the text paste would wait on the same
+            // silent clipboard, with no deadline of its own.
+            Err(paste::Unanswered) => {
+                self.set_status("The clipboard did not answer; nothing was pasted", true);
+                return true;
+            }
         };
         let (a, b) = self.editor.buf.selection().unwrap_or((self.editor.buf.caret, self.editor.buf.caret));
         self.attach(clip, a, b, "Pasted");
