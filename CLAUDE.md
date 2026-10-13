@@ -121,8 +121,8 @@ still show as links.
   A picture on the clipboard is saved
   as `Pasted image <YYYYMMDDHHMMSS>.<ext>`, and copied image files under
   their own names, in the vault's attachment folder for the note
-  (`attachments { folder }` in `.cce/vault.kdl`)
-  (`cce_vault::attachments`); each `![[…]]` goes on its own line at the
+  (`attachments { folder }` in `.cce/vault.kdl`, read by
+  `cce_vault::attachments`); each `![[…]]` goes on its own line at the
   caret. Copied files are checked first (a file manager offers their paths
   as `text/plain` too); a picture is taken only when no `text/plain` is
   offered, so text copied with an image rendering (browsers, office apps)
