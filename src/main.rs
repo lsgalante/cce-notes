@@ -1,16 +1,17 @@
-//! `cce-notes` — the vault's notes editor (Obsidian-on-cce, milestone 2).
+//! `cce-notes` — the vault's notes editor.
 //!
 //! A file tree on the left and one note on the right, read as rendered
 //! Markdown (the reading view) or edited in live preview (markup shown
-//! only on the caret's lines, cce-ui's `DocEditor`), toggled with Ctrl+E as
-//! in Obsidian; Ctrl+Shift+E turns the preview off (source mode). Links
+//! only on the caret's lines, cce-ui's `DocEditor`), toggled with Ctrl+E;
+//! Ctrl+Shift+E turns the preview off (source mode). Links
 //! follow on click — or Ctrl+click on the caret's line — and a link to a
 //! note that does not exist creates it. Ctrl+O is the quick switcher;
 //! Alt+←/→ walk the history.
 //!
 //! The files are the source of truth and there is no daemon: the app
-//! embeds a `cce_vault::Index` and a watcher, so an edit from Obsidian,
-//! Dropbox or another cce app arrives like any other change. A clean
+//! embeds a `cce_vault::Index` and a watcher, so an edit synced in by
+//! cce-sync (the phone's, Claude's) or from another cce app arrives like
+//! any other change. A clean
 //! buffer reloads silently; a dirty one is flagged as a conflict and never
 //! overwritten. Editing saves a moment after typing stops, on leaving the
 //! note, and on exit.
@@ -19,6 +20,7 @@
 //! `vault { path "…" }` in `~/.config/cce/config.kdl`. The app runs single
 //! instance (see [`instance`]); `cce-notes <note>` opens a note in it.
 
+mod agenda;
 mod images;
 mod instance;
 mod reading;
@@ -55,7 +57,7 @@ const BAND_H: f32 = 40.0;
 const STATUS_H: f32 = 26.0;
 const TREE_W: f32 = 240.0;
 const TREE_ROW_H: f32 = 24.0;
-/// Obsidian's "readable line length": the reading column's widest.
+/// A readable line length: the reading column's widest.
 const READ_MAX_W: f32 = 720.0;
 const READ_PAD: f32 = 28.0;
 const READ_SIZE: f32 = 15.0;
@@ -85,6 +87,8 @@ pub enum Message {
     ImageDecoded(String, Option<images::Decoded>),
     /// Links resolved to images already decoded: lay out again.
     ImagesReady,
+    /// A day's agenda lines, from the cce-sync daemon.
+    Agenda(String, Vec<String>),
     Exit,
 }
 
@@ -225,6 +229,10 @@ struct NotesApp {
     /// Embedded images, shared with the editor (see `images.rs`).
     images: images::Images,
     sender: calloop::channel::Sender<Message>,
+    /// The agenda lines of each day asked for (`YYYY-MM-DD`), and when it
+    /// was asked, for ```` ```agenda ```` blocks.
+    agendas: std::collections::HashMap<String, Vec<String>>,
+    agenda_asked: std::collections::HashMap<String, Instant>,
     /// A renderer has been made before: the next one is a reconnect, and
     /// every image id died with the old one.
     seen_renderer: bool,
@@ -264,7 +272,7 @@ struct NotesApp {
     conflict: bool,
     /// The open note was deleted or moved on disk. A save would recreate it
     /// (`write_text` creates missing files): bringing back a note deleted
-    /// elsewhere, or duplicating one Obsidian renamed. So it is a conflict
+    /// elsewhere, or duplicating one renamed elsewhere. So it is a conflict
     /// too — only Ctrl+S writes it again, and Ctrl+R closes it.
     gone: bool,
     status: Option<(String, bool)>,
@@ -346,6 +354,8 @@ impl NotesApp {
             editor,
             images,
             sender: sender.clone(),
+            agendas: std::collections::HashMap::new(),
+            agenda_asked: std::collections::HashMap::new(),
             seen_renderer: false,
             edit_changed_at: Instant::now(),
             history: Vec::new(),
@@ -795,7 +805,7 @@ impl NotesApp {
     }
 
     /// Create a note for a link or switcher query with no target, and open
-    /// it in source mode, as Obsidian does on a click on an unresolved link.
+    /// it in source mode, as a click on an unresolved link does.
     fn create_and_open(&mut self, name: &str) {
         let Some(ix) = self.index.as_mut() else { return };
         let name = name.trim().trim_start_matches('/');
@@ -1095,8 +1105,7 @@ impl NotesApp {
         self.refresh_switcher();
     }
 
-    /// Rename (or move) a note and rewrite every link to it, as Obsidian
-    /// does with "automatically update internal links" on.
+    /// Rename (or move) a note and rewrite every link to it.
     fn rename(&mut self, from: &str, to: &str) {
         if self.current.as_deref() == Some(from) && !self.save() {
             return;
@@ -1222,8 +1231,7 @@ impl NotesApp {
     }
 
     /// Ctrl+V with a picture (or copied image files) on the clipboard: save
-    /// them in the vault's attachment folder for this note, as Obsidian
-    /// does, and embed them at the caret, each on its own line. False when
+    /// them in the vault's attachment folder for this note, and embed them at the caret, each on its own line. False when
     /// the clipboard holds nothing of the kind (the text paste runs); true,
     /// with a status, when it did not answer at all.
     fn paste_images(&mut self) -> bool {
@@ -1262,7 +1270,7 @@ impl NotesApp {
                 return;
             }
         };
-        // The bare name, as Obsidian writes it — unless another file of that
+        // The bare name — unless another file of that
         // name would win the link, then the vault path. (The index learns of
         // the new file from the watcher, after this.)
         let embeds: Vec<String> = written
@@ -1408,6 +1416,8 @@ impl NotesApp {
         if matches!(&self.layout, Some((w, _)) if (w - width).abs() < 0.5) {
             return;
         }
+        let filled = self.agenda_blocks();
+        let blocks = filled.as_ref().unwrap_or(&self.blocks);
         let m = self.measure.get_or_insert_with(|| ShapingMeasure::new(true));
         let index = &self.index;
         let cur = self.current.as_deref();
@@ -1418,8 +1428,39 @@ impl NotesApp {
             _ => true,
         };
         let images = &self.images;
-        let laid = reading::layout_with(&self.blocks, width, &self.theme, m, &resolved, &|t| images.lookup(t));
+        let laid = reading::layout_with(blocks, width, &self.theme, m, &resolved, &|t| images.lookup(t));
         self.layout = Some((width, laid));
+    }
+
+    /// The note's blocks with its ```` ```agenda ```` blocks filled in (the
+    /// day's events, by `agenda.rs`), or `None` when it has none. Days not
+    /// known yet, or stale, are asked for.
+    fn agenda_blocks(&mut self) -> Option<Vec<Block>> {
+        let today = chrono::Local::now().date_naive();
+        let note_day = match (&self.index, &self.current) {
+            (Some(ix), Some(cur)) => cce_vault::daily::DailyConfig::load(ix).date_of(cur, today),
+            _ => None,
+        };
+        let days = cce_vault::agenda::wanted(&self.blocks, note_day);
+        if days.is_empty() && !self.blocks.iter().any(|b| matches!(b, Block::Code { lang: Some(l), .. } if l == cce_vault::agenda::LANG)) {
+            return None;
+        }
+        for day in days {
+            let key = day.to_string();
+            if self.agenda_asked.get(&key).is_some_and(|t| t.elapsed() < agenda::AGAIN) {
+                continue;
+            }
+            self.agenda_asked.insert(key.clone(), Instant::now());
+            let tx = self.sender.clone();
+            std::thread::spawn(move || {
+                let lines = agenda::fetch(&key);
+                let _ = tx.send(Message::Agenda(key, lines));
+            });
+        }
+        let mut blocks = self.blocks.clone();
+        let agendas = &self.agendas;
+        cce_vault::agenda::fill(&mut blocks, note_day, &|d| agendas.get(&d.to_string()).cloned(), "Loading the agenda…");
+        Some(blocks)
     }
 
     fn read_max_scroll(&self, m: &Metrics) -> f32 {
@@ -1922,6 +1963,10 @@ impl Application for NotesApp {
             Message::ImagesReady => {
                 self.layout = None;
                 self.editor.invalidate();
+            }
+            Message::Agenda(day, lines) => {
+                self.agendas.insert(day, lines);
+                self.layout = None;
             }
             Message::Exit => *_exit = true,
         }
@@ -2661,6 +2706,27 @@ mod tests {
 
     fn disk(dir: &Path, path: &str) -> String {
         std::fs::read_to_string(dir.join(path)).unwrap()
+    }
+
+    #[test]
+    fn a_daily_notes_agenda_block_is_filled_when_drawn() {
+        let today = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let name = format!("{today}.md");
+        let (d, mut app) = app_over(&[(&name, "# Today\n\n```agenda\n```\n- [ ] after\n")]);
+        app.open_path(&name, None, true);
+        let filled = app.agenda_blocks().unwrap();
+        assert!(format!("{filled:?}").contains("Loading the agenda…"));
+        assert!(app.agenda_asked.contains_key(&today), "the day was asked for");
+        let mut rebuild = false;
+        let mut exit = false;
+        app.update(Message::Agenda(today.clone(), vec!["09:00–09:15  Standup".into()]), &mut rebuild, &mut exit);
+        assert!(format!("{:?}", app.agenda_blocks().unwrap()).contains("09:00–09:15  Standup"));
+        assert_eq!(disk(d.path(), &name), "# Today\n\n```agenda\n```\n- [ ] after\n", "the file keeps the block empty");
+        // A note with no agenda block is left as parsed.
+        std::fs::write(d.path().join("B.md"), "plain\n").unwrap();
+        app.vault_changed(vec![d.path().join("B.md")]);
+        app.open_path("B.md", None, true);
+        assert!(app.agenda_blocks().is_none());
     }
 
     #[test]

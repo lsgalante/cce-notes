@@ -1,17 +1,16 @@
 # cce-notes
 
-The vault's notes editor — milestones 2, 3 and 6 of the Obsidian-on-cce
-plan, built on `cce-vault` (milestone 1). Three panes: files or search on
+The vault's notes editor, built on `cce-vault`. Three panes: files or search on
 the left, one note in the middle — shown as rendered Markdown (**reading
 view**) or edited with **live preview** (cce-ui's `DocEditor`: markup
-hidden except on the caret's lines), toggled with Ctrl+E as in Obsidian;
+hidden except on the caret's lines), toggled with Ctrl+E;
 Ctrl+Shift+E turns the preview off (**source mode**, the same editor) —
 and backlinks or the outline on the right. Agents reach the
 same vault through its MCP tools.
 
 Read `../cce-vault/CLAUDE.md` first: the index, watcher, writes and the
 `markdown` document model this app draws all live there, along with their
-invariants. The plan itself is a doc, "Obsidian-style notes on cce:
+invariants. The original plan is a doc, "Obsidian-style notes on cce:
 proposal".
 
 ## Layout
@@ -28,6 +27,7 @@ proposal".
 | `images.rs` | Embedded images: link text → vault path → decode thread → upload; the lookup the reading view and the editor share |
 | `paste.rs` | Ctrl+V and drops of a picture or image files: what the clipboard / drop offers, storing into the attachment folder, where the embeds go |
 | `tables.rs` | Where the note's GFM tables are (line ranges), by cce-sheets' own rule — for "Edit tables in Sheets" |
+| `agenda.rs` | The day's agenda for ```` ```agenda ```` blocks, asked of the cce-sync daemon (`agenda YYYY-MM-DD` on its socket) on a thread; this app holds no server token |
 | `instance.rs` | The CLI's commands, on the single-instance socket `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock` (claim, forward and listener are `cce_ui::ipc::instance`) |
 
 ## Behaviour worth knowing before changing it
@@ -37,7 +37,8 @@ proposal".
   open note reloads it silently when the buffer is clean, and raises a
   **conflict** when it is dirty: autosave stops, Ctrl+S writes ours over
   the disk copy, Ctrl+R loads theirs (`reload`). Never overwrite a dirty
-  conflict silently — Obsidian or Dropbox may be writing the same file.
+  conflict silently — cce-sync may be writing the same file (an edit from
+  the phone, or Claude's).
   `save_now` enforces it for every caller: in a conflict only a forced
   save (Ctrl+S) writes, so leaving for reading view or renaming is
   refused with the hint instead of winning for us. Quitting in a conflict
@@ -45,7 +46,7 @@ proposal".
   (`write_conflict_copy`) — there is no close prompt to ask with.
 - **A note deleted or moved on disk is a conflict too** (`gone`):
   `write_text` creates missing files, so an ordinary save would bring back
-  a note deleted elsewhere or duplicate one Obsidian renamed. Only Ctrl+S
+  a note deleted elsewhere or duplicate one renamed elsewhere. Only Ctrl+S
   writes it again; Ctrl+R closes it; its return (a sync's delete then
   write) clears it.
 - **Opening the note already open never reloads it** — a tree click, a
@@ -86,15 +87,26 @@ proposal".
   Ctrl+click on the caret's (raw) line — the editor answers
   `Response::Follow`. Unresolved links fade (a resolver passed at paint,
   `paint_prepared_with`). An unresolved link creates the note at the vault
-  root and opens it in the editor, as Obsidian does. Ctrl state comes from `UiContext::ctrl_pressed` (the
+  root and opens it in the editor. Ctrl state comes from `UiContext::ctrl_pressed` (the
   Wayland modifiers event) — a key event's own `ctrl` flag is stale for the
   Ctrl press itself.
+
+## The agenda block (`agenda.rs`)
+
+An empty ```` ```agenda ```` fence in a daily note (or one holding a date,
+`YYYY-MM-DD`) draws in reading view as that day's Google Calendar events:
+`agenda_blocks` fills a copy of the parsed blocks (`cce_vault::agenda::fill`,
+after parsing, so no line moves) from `agendas`, and asks the cce-sync
+daemon on a thread for a day it lacks or asked over five minutes ago; the
+answer comes back as `Message::Agenda` and drops the layout. The file keeps
+the block empty, and the editor shows it as it is. Without the daemon the
+block says so.
 
 ## Embedded images (`images.rs`)
 
 A paragraph that is one `![[pic.png]]` / `![](pic.png)` draws as the
 picture in reading and in live preview (cce-ui's `markdown::layout_with`
-and `DocEditor::set_images`; Obsidian's `|300` / `|300x200` sizes
+and `DocEditor::set_images`; `|300` / `|300x200` sizes
 honoured, too-wide images scaled to the column). An image embed inside a
 sentence flows with the text in reading view (its line grows to fit) and
 shows in a row below its line in live preview — the editor's rows are one
@@ -120,8 +132,9 @@ still show as links.
   on the UI thread, so an owner that never answers must not freeze it.
   A picture on the clipboard is saved
   as `Pasted image <YYYYMMDDHHMMSS>.<ext>`, and copied image files under
-  their own names, in Obsidian's attachment folder for the note
-  (`cce_vault::attachments`); each `![[…]]` goes on its own line at the
+  their own names, in the vault's attachment folder for the note
+  (`attachments { folder }` in `.cce/vault.kdl`, read by
+  `cce_vault::attachments`); each `![[…]]` goes on its own line at the
   caret. Copied files are checked first (a file manager offers their paths
   as `text/plain` too); a picture is taken only when no `text/plain` is
   offered, so text copied with an image rendering (browsers, office apps)
@@ -251,7 +264,7 @@ scale-1 shadow (1280×720) and pointer/caret maths at scale 2.
 ## Not done yet
 
 In the editor: property values are edited as raw YAML (the table flips
-to raw when the caret enters; Obsidian edits in place), tables and
+to raw when the caret enters, rather than editing in place), tables and
 callouts show raw, note embeds (`![[Note]]`) show as links (image embeds
 render; mid-sentence ones below their line rather than inside it), and a fenced block has no language label or copy button. Also heading
 completion (`[[Note#`), rendered snippets in the panes (they show

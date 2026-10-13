@@ -1,7 +1,7 @@
-//! Pasting and dropping images, as Obsidian does: a picture on
+//! Pasting and dropping images: a picture on
 //! the clipboard — a screenshot, an image copied in a browser — or image
 //! files copied in a file manager become files in the vault's attachment
-//! folder (`cce_vault::attachments`, Obsidian's own setting) and `![[…]]`
+//! folder (`cce_vault::attachments`, from the vault's settings) and `![[…]]`
 //! embeds at the caret. Anything else pastes as text, through the editor.
 //!
 //! The clipboard is read with `wl-paste`, as cce-ui's text paste reads it.
@@ -153,8 +153,8 @@ fn exit_by(child: &mut std::process::Child, deadline: Instant) -> Option<ExitSta
 }
 
 /// Write `clip` into `dir` (made if missing): a picture as `Pasted image
-/// <timestamp>.<ext>`, Obsidian's name; files under their own names. Names
-/// that clash are numbered. The paths written.
+/// <timestamp>.<ext>` (the vault's pasted images' usual name), files under
+/// their own names. Names that clash are numbered. The paths written.
 pub fn store(clip: Clip, dir: &Path, now: chrono::NaiveDateTime) -> std::io::Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dir)?;
     match clip {
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn stores_with_obsidian_names() {
+    fn stores_with_pasted_image_names() {
         let dir = tempfile::tempdir().unwrap();
         let now = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap().and_hms_opt(21, 35, 12).unwrap();
         let p = store(Clip::Image { bytes: b"png".to_vec(), ext: "png" }, &dir.path().join("att"), now).unwrap();

@@ -13,7 +13,7 @@ use crate::panel::{Action, Item};
 const SEARCH_LIMIT: usize = 50;
 
 /// Linked mentions (grouped by note, each with its lines), then unlinked
-/// mentions — Obsidian's backlinks pane.
+/// mentions.
 pub fn backlinks(ix: &Index, path: &str) -> Vec<Item> {
     let mut out = Vec::new();
     let mut by_source: BTreeMap<&str, Vec<usize>> = BTreeMap::new();

@@ -2,11 +2,14 @@
 name = "cce-notes"
 version = "0.1.0"
 edition = "2021"
-description = "The vault's notes editor: Obsidian-compatible reading view, source editing and links over cce-vault"
+description = "The vault's notes editor: reading view, live preview and source editing, and links over cce-vault"
 
 [dependencies]
 cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "8cf6009aab8260f0a079ee63870bda2473569018", features = ["markdown", "doc_editor"] }
-cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "ee2f46e35206779ad4fd5e4a1bdade01bde61977" }
+cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "e505879a46a3a065f562054ed9f5c8267089af38" }
+# The agenda's JSON and its lines (the daemon's `agenda` answer); the
+# library only, no I/O.
+cce-sync = { git = "https://github.com/lsgalante/cce-sync.git", rev = "8688b361ab41210be4f8f04cc46c2a285728e599", default-features = false }
 calloop = "0.13.0"
 wayland-client = { version = "0.31", features = ["system"] }
 chrono = "0.4"
