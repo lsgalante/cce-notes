@@ -27,6 +27,7 @@ proposal".
 | `images.rs` | Embedded images: link text → vault path → decode thread → upload; the lookup the reading view and the editor share |
 | `paste.rs` | Ctrl+V and drops of a picture or image files: what the clipboard / drop offers, storing into the attachment folder, where the embeds go |
 | `tables.rs` | Where the note's GFM tables are (line ranges), by cce-sheets' own rule — for "Edit tables in Sheets" |
+| `agenda.rs` | The day's agenda for ```` ```agenda ```` blocks, asked of the cce-sync daemon (`agenda YYYY-MM-DD` on its socket) on a thread; this app holds no server token |
 | `instance.rs` | The CLI's commands, on the single-instance socket `/tmp/cce-notes-<WAYLAND_DISPLAY>.sock` (claim, forward and listener are `cce_ui::ipc::instance`) |
 
 ## Behaviour worth knowing before changing it
@@ -89,6 +90,17 @@ proposal".
   root and opens it in the editor. Ctrl state comes from `UiContext::ctrl_pressed` (the
   Wayland modifiers event) — a key event's own `ctrl` flag is stale for the
   Ctrl press itself.
+
+## The agenda block (`agenda.rs`)
+
+An empty ```` ```agenda ```` fence in a daily note (or one holding a date,
+`YYYY-MM-DD`) draws in reading view as that day's Google Calendar events:
+`agenda_blocks` fills a copy of the parsed blocks (`cce_vault::agenda::fill`,
+after parsing, so no line moves) from `agendas`, and asks the cce-sync
+daemon on a thread for a day it lacks or asked over five minutes ago; the
+answer comes back as `Message::Agenda` and drops the layout. The file keeps
+the block empty, and the editor shows it as it is. Without the daemon the
+block says so.
 
 ## Embedded images (`images.rs`)
 
