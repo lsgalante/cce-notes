@@ -1,16 +1,17 @@
-//! `cce-notes` — the vault's notes editor (Obsidian-on-cce, milestone 2).
+//! `cce-notes` — the vault's notes editor.
 //!
 //! A file tree on the left and one note on the right, read as rendered
 //! Markdown (the reading view) or edited in live preview (markup shown
-//! only on the caret's lines, cce-ui's `DocEditor`), toggled with Ctrl+E as
-//! in Obsidian; Ctrl+Shift+E turns the preview off (source mode). Links
+//! only on the caret's lines, cce-ui's `DocEditor`), toggled with Ctrl+E;
+//! Ctrl+Shift+E turns the preview off (source mode). Links
 //! follow on click — or Ctrl+click on the caret's line — and a link to a
 //! note that does not exist creates it. Ctrl+O is the quick switcher;
 //! Alt+←/→ walk the history.
 //!
 //! The files are the source of truth and there is no daemon: the app
-//! embeds a `cce_vault::Index` and a watcher, so an edit from Obsidian,
-//! Dropbox or another cce app arrives like any other change. A clean
+//! embeds a `cce_vault::Index` and a watcher, so an edit synced in by
+//! cce-sync (the phone's, Claude's) or from another cce app arrives like
+//! any other change. A clean
 //! buffer reloads silently; a dirty one is flagged as a conflict and never
 //! overwritten. Editing saves a moment after typing stops, on leaving the
 //! note, and on exit.
@@ -55,7 +56,7 @@ const BAND_H: f32 = 40.0;
 const STATUS_H: f32 = 26.0;
 const TREE_W: f32 = 240.0;
 const TREE_ROW_H: f32 = 24.0;
-/// Obsidian's "readable line length": the reading column's widest.
+/// A readable line length: the reading column's widest.
 const READ_MAX_W: f32 = 720.0;
 const READ_PAD: f32 = 28.0;
 const READ_SIZE: f32 = 15.0;
@@ -264,7 +265,7 @@ struct NotesApp {
     conflict: bool,
     /// The open note was deleted or moved on disk. A save would recreate it
     /// (`write_text` creates missing files): bringing back a note deleted
-    /// elsewhere, or duplicating one Obsidian renamed. So it is a conflict
+    /// elsewhere, or duplicating one renamed elsewhere. So it is a conflict
     /// too — only Ctrl+S writes it again, and Ctrl+R closes it.
     gone: bool,
     status: Option<(String, bool)>,
@@ -795,7 +796,7 @@ impl NotesApp {
     }
 
     /// Create a note for a link or switcher query with no target, and open
-    /// it in source mode, as Obsidian does on a click on an unresolved link.
+    /// it in source mode, as a click on an unresolved link does.
     fn create_and_open(&mut self, name: &str) {
         let Some(ix) = self.index.as_mut() else { return };
         let name = name.trim().trim_start_matches('/');
@@ -1095,8 +1096,7 @@ impl NotesApp {
         self.refresh_switcher();
     }
 
-    /// Rename (or move) a note and rewrite every link to it, as Obsidian
-    /// does with "automatically update internal links" on.
+    /// Rename (or move) a note and rewrite every link to it.
     fn rename(&mut self, from: &str, to: &str) {
         if self.current.as_deref() == Some(from) && !self.save() {
             return;
@@ -1222,8 +1222,7 @@ impl NotesApp {
     }
 
     /// Ctrl+V with a picture (or copied image files) on the clipboard: save
-    /// them in the vault's attachment folder for this note, as Obsidian
-    /// does, and embed them at the caret, each on its own line. False when
+    /// them in the vault's attachment folder for this note, and embed them at the caret, each on its own line. False when
     /// the clipboard holds nothing of the kind (the text paste runs); true,
     /// with a status, when it did not answer at all.
     fn paste_images(&mut self) -> bool {
@@ -1262,7 +1261,7 @@ impl NotesApp {
                 return;
             }
         };
-        // The bare name, as Obsidian writes it — unless another file of that
+        // The bare name — unless another file of that
         // name would win the link, then the vault path. (The index learns of
         // the new file from the watcher, after this.)
         let embeds: Vec<String> = written

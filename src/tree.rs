@@ -1,7 +1,6 @@
 //! The file tree pane's model: the vault's notes as folder and note rows,
-//! folders first and each level sorted case-insensitively, as Obsidian's
-//! file explorer shows them. Folders exist only as the parents of indexed
-//! files, so an empty folder does not appear.
+//! folders first and each level sorted case-insensitively. Folders exist
+//! only as the parents of indexed files, so an empty folder does not appear.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -1,6 +1,6 @@
 //! `[[` completion in source mode: find the link being typed at the caret,
 //! and write the chosen note back in the shortest form that still reaches
-//! it, as Obsidian does. Positions are char indices (the TextBox's own
+//! it. Positions are char indices (the TextBox's own
 //! `cursor_idx` unit), not bytes.
 
 use cce_vault::index::stem;
