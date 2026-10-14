@@ -18,7 +18,7 @@ proposal".
 | File | What it owns |
 | --- | --- |
 | `main.rs` | The `Application`: panes, modes, history, switcher + rename prompt, completion, autosave, conflicts, input; hosts the `DocEditor` |
-| `reading.rs` | Re-exports cce-ui's `widget::markdown` (the reading view's layout, shared with cce-grid's note cards) under the name the app uses |
+| `reading.rs` | Re-exports cce-ui's `widget::markdown` (the reading view's layout, shared with cce-desktop's note cards) under the name the app uses |
 | `tree.rs` | The file tree's rows (folders first, case-insensitive, collapsible) |
 | `panel.rs` | The scrollable header/title/line list both side panes draw through |
 | `side.rs` | What the panes list: backlinks + unlinked mentions, outline, text and tag search |
@@ -163,7 +163,7 @@ still show as links.
 ## The reading view
 
 The layout is cce-ui's `widget::markdown` (`MarkdownView`, behind its
-`markdown` feature), which cce-grid's note cards draw too; `reading.rs`
+`markdown` feature), which cce-desktop's note cards draw too; `reading.rs`
 only re-exports it. How it lays a paragraph out word by word, glues a
 word running across styles, converts its sRGB colours and draws bullets
 as discs is documented there — change it there, for both surfaces. What
