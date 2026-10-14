@@ -633,7 +633,7 @@ impl NotesApp {
         }
     }
 
-    // ---- tables in cce-sheets --------------------------------------------
+    // ---- tables in cce-spreadsheet -----------------------------------
 
     /// The open note's tables, as source line ranges (`tables.rs`).
     fn note_tables(&self) -> Vec<std::ops::Range<usize>> {
@@ -643,14 +643,14 @@ impl NotesApp {
         tables::table_lines(&self.editor_text())
     }
 
-    /// The open note's absolute path once it can be handed to cce-sheets:
+    /// The open note's absolute path once it can be handed to cce-spreadsheet:
     /// it has a table, and the file on disk is what the window shows —
-    /// cce-sheets reads the file, so unsaved edits are saved first. `None`,
+    /// cce-spreadsheet reads the file, so unsaved edits are saved first. `None`,
     /// with a status, when not.
     fn sheets_path(&mut self) -> Option<PathBuf> {
         let cur = self.current.clone()?;
         if self.conflict {
-            // The disk copy is not ours (or is gone): cce-sheets would open
+            // The disk copy is not ours (or is gone): cce-spreadsheet would open
             // something other than the screen, or nothing.
             self.set_status(self.conflict_hint(), true);
             return None;
@@ -665,17 +665,17 @@ impl NotesApp {
         self.index.as_ref().map(|ix| ix.abs(&cur))
     }
 
-    /// "Edit tables in Sheets": `cce-sheets <note>`, one sheet per table.
+    /// "Edit tables in Spreadsheet": `cce-spreadsheet <note>`, one sheet per table.
     /// Its saves rewrite only the tables' lines and come back through the
     /// watcher like any other write: a clean buffer reloads, a dirty one
     /// is a conflict.
     fn edit_tables_in_sheets(&mut self) {
         let Some(abs) = self.sheets_path() else { return };
-        let mut cmd = std::process::Command::new("cce-sheets");
+        let mut cmd = std::process::Command::new("cce-spreadsheet");
         cmd.arg(&abs);
         match spawn_detached(cmd) {
-            Ok(()) => self.set_status("Tables opened in cce-sheets; its saves land here", false),
-            Err(e) => self.set_status(format!("Could not start cce-sheets: {e}"), true),
+            Ok(()) => self.set_status("Tables opened in cce-spreadsheet; its saves land here", false),
+            Err(e) => self.set_status(format!("Could not start cce-spreadsheet: {e}"), true),
         }
     }
 
@@ -698,7 +698,7 @@ impl NotesApp {
         }
     }
 
-    /// Right-press over a table: a menu offering it to cce-sheets. False
+    /// Right-press over a table: a menu offering it to cce-spreadsheet. False
     /// when the press missed every table.
     fn open_table_menu(&mut self, x: f32, y: f32) -> bool {
         let Some(line) = self.note_line_at(x, y) else { return false };
@@ -706,7 +706,7 @@ impl NotesApp {
             return false;
         }
         use cce_ui::widget::context_menu;
-        context_menu::show(x, y, vec!["Edit tables in Sheets".to_string()], 0, cce_ui::widget::WidgetId(0));
+        context_menu::show(x, y, vec!["Edit tables in Spreadsheet".to_string()], 0, cce_ui::widget::WidgetId(0));
         self.note_menu = Some(context_menu::generation());
         true
     }
@@ -2857,7 +2857,7 @@ mod tests {
     #[test]
     fn sheets_gets_the_note_saved_and_only_with_a_table() {
         let (d, mut app) = app_over(&[("T.md", TABLE_NOTE), ("Plain.md", "no table\n")]);
-        // Unsaved edits are written first: cce-sheets reads the file.
+        // Unsaved edits are written first: cce-spreadsheet reads the file.
         open_and_type(&mut app, "T.md", "typed");
         assert_eq!(app.sheets_path(), Some(d.path().join("T.md")));
         assert!(!app.dirty());
@@ -2878,7 +2878,7 @@ mod tests {
         assert_eq!(disk(d.path(), "T.md"), TABLE_NOTE, "the conflict was not written over");
     }
 
-    /// cce-sheets' save rewrites only the table's lines; the watcher brings
+    /// cce-spreadsheet's save rewrites only the table's lines; the watcher brings
     /// it back like any other write.
     #[test]
     fn a_sheets_save_reloads_a_clean_note_and_conflicts_a_dirty_one() {

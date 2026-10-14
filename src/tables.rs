@@ -1,7 +1,7 @@
-//! Where a note's GFM tables are, for handing the note to cce-sheets.
+//! Where a note's GFM tables are, for handing the note to cce-spreadsheet.
 //!
-//! The rule is cce-sheets' own (`cce-sheets/src/md.rs`, `tables`), kept in
-//! step by hand so "Edit tables in Sheets" is offered exactly when cce-sheets
+//! The rule is cce-spreadsheet's own (`cce-spreadsheet/src/md.rs`, `tables`), kept in
+//! step by hand so "Edit tables in Spreadsheet" is offered exactly when cce-spreadsheet
 //! will find something to open: a line with a pipe, then a delimiter line of
 //! as many `---` cells (`:` marks allowed), then body lines until a blank
 //! line, a line without a pipe or a fence. Fenced code (``` / ~~~) is
@@ -64,7 +64,7 @@ fn is_fence(line: &str) -> Option<&'static str> {
     }
 }
 
-/// A row's cells, as cce-sheets splits it: outer pipes optional, `\|` is
+/// A row's cells, as cce-spreadsheet splits it: outer pipes optional, `\|` is
 /// not a separator.
 fn cells(line: &str) -> Vec<String> {
     let s = line.trim();
