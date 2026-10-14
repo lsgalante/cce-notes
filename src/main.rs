@@ -1849,7 +1849,9 @@ fn paint_tabs(pc: &mut PaintCtx, r: Rect, labels: &[&str], active: usize) {
         );
         if i == active {
             let u = Rect { x: cell.x + 14.0, y: cell.y + cell.height - 3.0, width: (cell.width - 28.0).max(4.0), height: 2.0 };
-            pc.rounded_rect(u, 1.0, (true, true, true, true), cce_ui::color::to_linear([0.66, 0.55, 0.98, 1.0]));
+            let mut accent = cce_ui::color::highlight_primary_color();
+            accent[3] = 1.0;
+            pc.rounded_rect(u, 1.0, (true, true, true, true), accent);
         }
     }
 }
