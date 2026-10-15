@@ -11,7 +11,7 @@
 //! window, and writes go through the same paths (a note open and dirty in
 //! the window raises the usual conflict rather than being overwritten).
 
-use cce_ui::mcp::{McpTool, McpToolCall};
+use cce_ui::mcp::{McpServer, McpTool, McpToolCall, ToolClass};
 use cce_vault::index::stem;
 use cce_vault::FileKind;
 use serde_json::{json, Value};
@@ -20,9 +20,43 @@ use crate::{Message, NotesApp};
 
 const DEFAULT_PORT: u16 = 3002;
 
+/// What the model is told about the notes app when a client connects.
+const BRIEF: &str = "\
+cce-notes is the user's notes vault: Markdown notes with [[wikilinks]], #tags, YAML frontmatter, \
+`- [ ]` tasks (`📅 YYYY-MM-DD` for a due date) and a daily note per day. The user keeps their \
+schedule, tasks, finances and projects here. Call `context` first: it names the note open in \
+the window and quotes its first lines. Find notes with `search` (full text, or `#tag`) and \
+`find_notes` (names), read them whole with `read_note` before saying what is in them. \
+`append_daily` adds to a daily note; the vault keeps every version of a note, so a change can \
+be taken back. The user's calendar and spreadsheets may be connected as well.";
+
 pub fn start(sender: calloop::channel::Sender<Message>) {
     let port = std::env::var("CCE_NOTES_MCP_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT);
-    cce_ui::mcp::start_mcp_server("cce-notes", port, tools(), sender, Message::Mcp);
+    server().fixed_port(port).start(sender, Message::Mcp);
+}
+
+/// The server: the tools, what each does to the world, the brief, and the
+/// vault apps a client should load beside it.
+fn server() -> McpServer {
+    McpServer::new("cce-notes", tools())
+        .instructions(BRIEF)
+        .companions(&["cce-calendar", "cce-spreadsheet"])
+        .classify(ToolClass::Read, &["search", "find_notes", "read_note", "backlinks", "current_note"])
+        // A note's every version is kept (cce-sync), so a write can be taken back.
+        .classify(ToolClass::Edit, &["open_note", "append_daily"])
+}
+
+/// The `context` answer for the window's state: the open note (its text as
+/// shown, unsaved edits included) or none.
+fn note_context(path: Option<&str>, mode: &str, unsaved: bool, conflict: bool, text: Option<&str>) -> cce_ui::mcp::Context {
+    cce_ui::mcp::Context {
+        document: path.map(|p| cce_ui::mcp::ContextDocument { title: stem(p).to_string(), path: Some(p.to_string()) }),
+        view: json!({ "mode": mode, "conflict_with_disk": conflict }),
+        dirty: path.map(|_| unsaved),
+        undo: Some("the vault keeps every version of a note; the window's own undo covers typing".into()),
+        summary: text.filter(|t| !t.trim().is_empty()).map(|t| format!("The open note, from the top:\n{t}")),
+        ..cce_ui::mcp::Context::new(concat!("cce-notes ", env!("CARGO_PKG_VERSION")))
+    }
 }
 
 fn tools() -> Vec<McpTool> {
@@ -33,6 +67,7 @@ fn tools() -> Vec<McpTool> {
     };
     let note_arg = json!({ "type": "string", "description": "A note name, vault path, or path without .md" });
     vec![
+        cce_ui::mcp::context_tool(),
         tool(
             "search",
             "Full-text search over the vault's notes (every word must match), or `#tag` / `tag:name` for the notes carrying a tag. Returns matching notes with up to 5 matching lines each (1-based line numbers).",
@@ -108,6 +143,15 @@ impl NotesApp {
 
     fn mcp_dispatch(&mut self, name: &str, args: &Value) -> Result<Value, String> {
         match name {
+            cce_ui::mcp::CONTEXT_TOOL => {
+                let mode = if self.mode == crate::Mode::Source { "source" } else { "reading" };
+                let text = match (&self.current, self.dirty()) {
+                    (Some(_), true) => Some(self.editor_text()),
+                    (Some(p), false) => self.index.as_ref().and_then(|ix| ix.read_text(p).ok()),
+                    (None, _) => None,
+                };
+                Ok(note_context(self.current.as_deref(), mode, self.dirty(), self.conflict, text.as_deref()).into_result())
+            }
             "current_note" => Ok(json!({
                 "path": self.current,
                 "mode": if self.mode == crate::Mode::Source { "source" } else { "reading" },
@@ -208,4 +252,27 @@ impl NotesApp {
 
 fn ix_abs(app: &NotesApp, path: &str) -> std::path::PathBuf {
     app.index.as_ref().map(|ix| ix.abs(path)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_tool_is_classed() {
+        // An unclassed tool makes the popup ask before every call.
+        assert!(server().unclassed().is_empty(), "classify these in server(): {:?}", server().unclassed());
+    }
+
+    #[test]
+    fn context_quotes_the_open_note_and_says_when_none_is() {
+        let c = note_context(Some("Finance/Budget.md"), "reading", false, false, Some("# Budget\n- [ ] pay rent")).into_result();
+        assert_eq!(c["document"]["title"], "Budget");
+        assert_eq!(c["document"]["path"], "Finance/Budget.md");
+        assert_eq!(c["dirty"], false);
+        assert!(c["summary"].as_str().unwrap().ends_with("- [ ] pay rent"));
+
+        let none = note_context(None, "reading", false, false, None).into_result();
+        assert!(none.get("document").is_none() && none.get("summary").is_none() && none.get("dirty").is_none());
+    }
 }

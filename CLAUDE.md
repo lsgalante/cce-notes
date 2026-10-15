@@ -23,7 +23,7 @@ proposal".
 | `panel.rs` | The scrollable header/title/line list both side panes draw through |
 | `side.rs` | What the panes list: backlinks + unlinked mentions, outline, text and tag search |
 | `complete.rs` | `[[` completion: the open link at the caret, the shortest link text, the splice |
-| `mcp.rs` | MCP tools (`search`, `find_notes`, `read_note`, `backlinks`, `open_note`, `append_daily`, `current_note`) |
+| `mcp.rs` | MCP server (`server()`: each tool classed read/edit, the brief, companions cce-calendar and cce-spreadsheet; `every_tool_is_classed` guards a new tool) and its tools (`context`, `search`, `find_notes`, `read_note`, `backlinks`, `open_note`, `append_daily`, `current_note`) |
 | `images.rs` | Embedded images: link text → vault path → decode thread → upload; the lookup the reading view and the editor share |
 | `paste.rs` | Ctrl+V and drops of a picture or image files: what the clipboard / drop offers, storing into the attachment folder, where the embeds go |
 | `tables.rs` | Where the note's GFM tables are (line ranges), by cce-spreadsheet's own rule — for "Edit tables in Spreadsheet" |
