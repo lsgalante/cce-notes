@@ -26,9 +26,13 @@ cce-notes is the user's notes vault: Markdown notes with [[wikilinks]], #tags, Y
 `- [ ]` tasks (`📅 YYYY-MM-DD` for a due date) and a daily note per day. The user keeps their \
 schedule, tasks, finances and projects here. Call `context` first: it names the note open in \
 the window and quotes its first lines. Find notes with `search` (full text, or `#tag`) and \
-`find_notes` (names), read them whole with `read_note` before saying what is in them. \
-`append_daily` adds to a daily note; the vault keeps every version of a note, so a change can \
-be taken back. The user's calendar and spreadsheets may be connected as well.";
+`find_notes` (names), and `tasks` for open tasks and what is due; read a note whole with \
+`read_note` before changing it. Change notes with `edit_note` (an exact passage), \
+`append_note` (at the end, or under a heading) and `set_task` (tick, untick, set a due date); \
+`append_daily` adds to a daily note. Write tasks as `- [ ] text 📅 YYYY-MM-DD` and links as \
+[[Note Name]]. A note open in the window with unsaved edits cannot be changed until the user \
+saves it. The vault keeps every version of a note, so a change can be taken back. The user's \
+calendar and spreadsheets may be connected as well.";
 
 pub fn start(sender: calloop::channel::Sender<Message>) {
     let port = std::env::var("CCE_NOTES_MCP_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT);
@@ -41,9 +45,9 @@ fn server() -> McpServer {
     McpServer::new("cce-notes", tools())
         .instructions(BRIEF)
         .companions(&["cce-calendar", "cce-spreadsheet"])
-        .classify(ToolClass::Read, &["search", "find_notes", "read_note", "backlinks", "current_note"])
+        .classify(ToolClass::Read, &["search", "find_notes", "read_note", "backlinks", "current_note", "tasks"])
         // A note's every version is kept (cce-sync), so a write can be taken back.
-        .classify(ToolClass::Edit, &["open_note", "append_daily"])
+        .classify(ToolClass::Edit, &["open_note", "append_daily", "edit_note", "append_note", "set_task"])
 }
 
 /// The `context` answer for the window's state: the open note (its text as
@@ -111,6 +115,45 @@ fn tools() -> Vec<McpTool> {
             }, "required": ["text"] }),
         ),
         tool(
+            "tasks",
+            "Tasks (`- [ ]` lines) across the vault, each with its note, 1-based line, status (' ' open, 'x' done), text and due date.",
+            json!({ "type": "object", "properties": {
+                "status": { "type": "string", "enum": ["open", "done", "all"], "description": "Default open" },
+                "due_before": { "type": "string", "description": "Only tasks due on or before this date, YYYY-MM-DD" },
+                "note": { "type": "string", "description": "Only in this note or folder (vault path)" },
+                "limit": { "type": "integer", "description": "Most tasks to return (default 200)" }
+            } }),
+        ),
+        tool(
+            "edit_note",
+            "Replace an exact passage of a note with new text. `old_text` must match exactly once (or set `replace_all`): read the note first and quote it.",
+            json!({ "type": "object", "properties": {
+                "note": note_arg,
+                "old_text": { "type": "string", "description": "The exact text to replace" },
+                "new_text": { "type": "string", "description": "What replaces it" },
+                "replace_all": { "type": "boolean", "description": "Replace every occurrence" }
+            }, "required": ["note", "old_text", "new_text"] }),
+        ),
+        tool(
+            "append_note",
+            "Add text at the end of a note (creating it if missing; give a vault path for a new one), or at the end of the section under a heading.",
+            json!({ "type": "object", "properties": {
+                "note": note_arg,
+                "text": { "type": "string" },
+                "heading": { "type": "string", "description": "Add under this heading instead of at the end" }
+            }, "required": ["note", "text"] }),
+        ),
+        tool(
+            "set_task",
+            "Tick or untick the task on a line of a note, and/or set its due date (written `📅 YYYY-MM-DD` at the end; null removes it).",
+            json!({ "type": "object", "properties": {
+                "note": note_arg,
+                "line": { "type": "integer", "description": "The task's line, from 1 (as `tasks` and `search` show)" },
+                "done": { "type": "boolean" },
+                "due": { "type": ["string", "null"], "description": "YYYY-MM-DD, or null to remove the due date" }
+            }, "required": ["note", "line"] }),
+        ),
+        tool(
             "current_note",
             "What the window shows: the open note's path, the mode (reading or source), whether it has unsaved edits, and whether they conflict with the disk copy (changed, or deleted or moved, on disk).",
             json!({ "type": "object", "properties": {} }),
@@ -122,6 +165,17 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key).and_then(Value::as_str).ok_or_else(|| format!("missing string argument `{key}`"))
 }
 
+/// `body` with `old` replaced by `new` (every occurrence with `all`, else
+/// exactly one), and how many were replaced; the refusal says why.
+fn replace_exact(body: &str, old: &str, new: &str, all: bool) -> Result<(String, usize), String> {
+    let n = if old.is_empty() { 0 } else { body.matches(old).count() };
+    match n {
+        0 => Err("old_text was not found; read the note and quote it exactly".into()),
+        n if n > 1 && !all => Err(format!("old_text occurs {n} times; quote more of it, or set replace_all")),
+        n => Ok(if all { (body.replace(old, new), n) } else { (body.replacen(old, new, 1), 1) }),
+    }
+}
+
 fn limit_arg(args: &Value, default: usize) -> usize {
     args.get("limit").and_then(Value::as_u64).map(|n| n.clamp(1, 200) as usize).unwrap_or(default)
 }
@@ -130,6 +184,22 @@ impl NotesApp {
     pub(crate) fn mcp_call(&mut self, call: McpToolCall) {
         let result = self.mcp_dispatch(&call.name, &call.arguments);
         let _ = call.reply.send(result);
+    }
+
+    /// Refuse to write a note the window holds unsaved edits to: the write
+    /// would turn the user's typing into a conflict.
+    fn writable(&self, path: &str) -> Result<(), String> {
+        if self.current.as_deref() == Some(path) && self.dirty() {
+            return Err(format!("{path} is open in the window with unsaved edits; ask the user to save it first"));
+        }
+        Ok(())
+    }
+
+    /// After an agent's write: the index and the window catch up as they do
+    /// for any outside edit.
+    fn wrote(&mut self, path: &str) {
+        let abs = ix_abs(self, path);
+        self.vault_changed(vec![abs]);
     }
 
     fn resolve_note(&self, note: &str) -> Result<String, String> {
@@ -169,6 +239,60 @@ impl NotesApp {
                 self.needs_rebuild = true;
                 Ok(json!({ "opened": path }))
             }
+            "edit_note" => {
+                let path = self.resolve_note(str_arg(args, "note")?)?;
+                self.writable(&path)?;
+                let all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+                let ix = self.index.as_mut().ok_or("no vault is configured")?;
+                let body = ix.read_text(&path).map_err(|e| e.to_string())?;
+                let (edited, n) = replace_exact(&body, str_arg(args, "old_text")?, str_arg(args, "new_text")?, all)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                ix.write_text(&path, &edited).map_err(|e| e.to_string())?;
+                self.wrote(&path);
+                Ok(json!({ "edited": path, "replacements": n }))
+            }
+            "append_note" => {
+                let given = str_arg(args, "note")?;
+                // An existing note by any name, or a new one by its path.
+                let path = match self.resolve_note(given) {
+                    Ok(p) => p,
+                    Err(_) if given.trim().ends_with(".md") => given.trim().trim_start_matches('/').to_string(),
+                    Err(_) => format!("{}.md", given.trim().trim_start_matches('/')),
+                };
+                self.writable(&path)?;
+                let heading = args.get("heading").and_then(Value::as_str);
+                let ix = self.index.as_mut().ok_or("no vault is configured")?;
+                ix.append_under(&path, str_arg(args, "text")?, heading).map_err(|e| e.to_string())?;
+                self.wrote(&path);
+                Ok(json!({ "appended_to": path }))
+            }
+            "set_task" => {
+                let path = self.resolve_note(str_arg(args, "note")?)?;
+                self.writable(&path)?;
+                let line = args.get("line").and_then(Value::as_u64).filter(|&l| l >= 1).ok_or("`line` is required, from 1")? as usize - 1;
+                let done = args.get("done").and_then(Value::as_bool);
+                let due = match args.get("due") {
+                    None => None,
+                    Some(Value::Null) => Some(None),
+                    Some(Value::String(d)) => Some(Some(
+                        chrono::NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d").map_err(|_| format!("not a YYYY-MM-DD date: {d}"))?,
+                    )),
+                    Some(v) => return Err(format!("`due` must be YYYY-MM-DD or null, got {v}")),
+                };
+                if done.is_none() && due.is_none() {
+                    return Err("give `done`, `due`, or both".into());
+                }
+                let ix = self.index.as_mut().ok_or("no vault is configured")?;
+                if let Some(done) = done {
+                    ix.set_task(&path, line, if done { 'x' } else { ' ' }).map_err(|e| e.to_string())?;
+                }
+                if let Some(due) = due {
+                    ix.set_task_due(&path, line, due).map_err(|e| e.to_string())?;
+                }
+                self.wrote(&path);
+                let now = ix_text_line(self, &path, line);
+                Ok(json!({ "note": path, "line": line + 1, "now": now }))
+            }
             "append_daily" => {
                 let text = str_arg(args, "text")?.to_string();
                 let date = match args.get("date").and_then(Value::as_str) {
@@ -207,6 +331,35 @@ impl NotesApp {
                             })
                             .collect();
                         Ok(json!(hits))
+                    }
+                    "tasks" => {
+                        let status = args.get("status").and_then(Value::as_str).unwrap_or("open");
+                        let due_before = match args.get("due_before").and_then(Value::as_str) {
+                            Some(d) => Some(chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| format!("not a date: {d}"))?),
+                            None => None,
+                        };
+                        let within = args.get("note").and_then(Value::as_str).map(|p| p.trim().trim_start_matches('/').trim_end_matches('/'));
+                        let limit = args.get("limit").and_then(Value::as_u64).map(|n| n.clamp(1, 2000) as usize).unwrap_or(200);
+                        let mut out: Vec<Value> = ix
+                            .tasks()
+                            .filter(|(p, t)| match status {
+                                "open" => t.status == ' ',
+                                "done" => t.status != ' ',
+                                _ => true,
+                            } && within.is_none_or(|w| *p == w || p.starts_with(&format!("{w}/")) || p.strip_suffix(".md") == Some(w))
+                                && due_before.is_none_or(|d| t.due.is_some_and(|due| due <= d)))
+                            .map(|(p, t)| json!({
+                                "note": p,
+                                "line": t.line + 1,
+                                "status": t.status.to_string(),
+                                // The date is `due`; the text without it.
+                                "text": cce_vault::parse::split_due(&t.text).0,
+                                "due": t.due.map(|d| d.to_string()),
+                            }))
+                            .collect();
+                        let total = out.len();
+                        out.truncate(limit);
+                        Ok(json!({ "tasks": out, "total": total }))
                     }
                     "find_notes" => {
                         let q = str_arg(args, "query")?;
@@ -250,6 +403,12 @@ impl NotesApp {
     }
 }
 
+/// Line `line` (0-based) of a note as it stands on disk.
+fn ix_text_line(app: &NotesApp, path: &str, line: usize) -> Option<String> {
+    let text = app.index.as_ref()?.read_text(path).ok()?;
+    text.lines().nth(line).map(str::to_string)
+}
+
 fn ix_abs(app: &NotesApp, path: &str) -> std::path::PathBuf {
     app.index.as_ref().map(|ix| ix.abs(path)).unwrap_or_default()
 }
@@ -257,6 +416,66 @@ fn ix_abs(app: &NotesApp, path: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::tests::{app_over, open_and_type};
+
+    fn call(app: &mut NotesApp, name: &str, args: Value) -> Result<Value, String> {
+        app.mcp_dispatch(name, &args)
+    }
+
+    fn on_disk(dir: &tempfile::TempDir, path: &str) -> String {
+        std::fs::read_to_string(dir.path().join(path)).unwrap()
+    }
+
+    #[test]
+    fn edit_note_replaces_exactly_one_passage() {
+        let (dir, mut app) = app_over(&[("Plan.md", "rent 900\nrent 900\nfood 300\n")]);
+        let err = call(&mut app, "edit_note", json!({ "note": "Plan", "old_text": "rent 900", "new_text": "rent 950" })).unwrap_err();
+        assert!(err.contains("occurs 2 times"), "{err}");
+        assert!(call(&mut app, "edit_note", json!({ "note": "Plan", "old_text": "nope", "new_text": "x" })).is_err());
+        call(&mut app, "edit_note", json!({ "note": "Plan", "old_text": "food 300", "new_text": "food 320" })).unwrap();
+        let r = call(&mut app, "edit_note", json!({ "note": "Plan", "old_text": "rent 900", "new_text": "rent 950", "replace_all": true })).unwrap();
+        assert_eq!(r["replacements"], 2);
+        assert_eq!(on_disk(&dir, "Plan.md"), "rent 950\nrent 950\nfood 320\n");
+    }
+
+    #[test]
+    fn append_note_goes_under_a_heading_or_makes_a_note() {
+        let (dir, mut app) = app_over(&[("Plan.md", "# Plan\n## Tasks\n- [ ] a\n\n## Log\n")]);
+        call(&mut app, "append_note", json!({ "note": "Plan", "text": "- [ ] b", "heading": "Tasks" })).unwrap();
+        assert_eq!(on_disk(&dir, "Plan.md"), "# Plan\n## Tasks\n- [ ] a\n- [ ] b\n\n## Log\n");
+        let r = call(&mut app, "append_note", json!({ "note": "Finance/Insurance", "text": "renews in March" })).unwrap();
+        assert_eq!(r["appended_to"], "Finance/Insurance.md");
+        assert_eq!(on_disk(&dir, "Finance/Insurance.md"), "renews in March\n");
+        // The index knows the new note at once: it reads back by name.
+        assert_eq!(call(&mut app, "read_note", json!({ "note": "Insurance" })).unwrap()["path"], "Finance/Insurance.md");
+    }
+
+    #[test]
+    fn set_task_ticks_and_dates_and_tasks_finds_it() {
+        let (dir, mut app) = app_over(&[("Plan.md", "- [ ] pay rent\n- [ ] call bank\n")]);
+        call(&mut app, "set_task", json!({ "note": "Plan", "line": 2, "due": "2026-10-30" })).unwrap();
+        let due = call(&mut app, "tasks", json!({ "due_before": "2026-10-31" })).unwrap();
+        assert_eq!(due["total"], 1);
+        assert_eq!(due["tasks"][0]["text"], "call bank");
+        assert_eq!(due["tasks"][0]["due"], "2026-10-30");
+        let r = call(&mut app, "set_task", json!({ "note": "Plan", "line": 1, "done": true })).unwrap();
+        assert_eq!(r["now"], "- [x] pay rent");
+        assert_eq!(on_disk(&dir, "Plan.md"), "- [x] pay rent\n- [ ] call bank 📅 2026-10-30\n");
+        assert_eq!(call(&mut app, "tasks", json!({})).unwrap()["total"], 1);
+        assert_eq!(call(&mut app, "tasks", json!({ "status": "done" })).unwrap()["tasks"][0]["line"], 1);
+        assert!(call(&mut app, "set_task", json!({ "note": "Plan", "line": 1 })).is_err(), "nothing to change");
+    }
+
+    #[test]
+    fn a_note_with_unsaved_edits_in_the_window_is_not_written() {
+        let (dir, mut app) = app_over(&[("Plan.md", "rent 900\n")]);
+        open_and_type(&mut app, "Plan.md", "typing");
+        let err = call(&mut app, "edit_note", json!({ "note": "Plan", "old_text": "rent 900", "new_text": "x" })).unwrap_err();
+        assert!(err.contains("unsaved edits"), "{err}");
+        assert!(call(&mut app, "append_note", json!({ "note": "Plan", "text": "y" })).is_err());
+        assert_eq!(on_disk(&dir, "Plan.md"), "rent 900\n");
+    }
 
     #[test]
     fn every_tool_is_classed() {

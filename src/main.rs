@@ -2677,7 +2677,7 @@ mod tests {
     use super::*;
 
     /// The app over a temp vault holding `files`, editing nothing yet.
-    fn app_over(files: &[(&str, &str)]) -> (tempfile::TempDir, NotesApp) {
+    pub(crate) fn app_over(files: &[(&str, &str)]) -> (tempfile::TempDir, NotesApp) {
         let dir = tempfile::tempdir().unwrap();
         for (p, t) in files {
             let abs = dir.path().join(p);
@@ -2690,7 +2690,7 @@ mod tests {
     }
 
     /// Open `path` in the editor and type `text` at its end, unsaved.
-    fn open_and_type(app: &mut NotesApp, path: &str, text: &str) {
+    pub(crate) fn open_and_type(app: &mut NotesApp, path: &str, text: &str) {
         app.open_path(path, None, true);
         app.set_mode(Mode::Source);
         let last = app.editor.buf.line_count() - 1;
