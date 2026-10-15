@@ -5,7 +5,7 @@ edition = "2021"
 description = "The vault's notes editor: reading view, live preview and source editing, and links over cce-vault"
 
 [dependencies]
-cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "0fea442adf72f0883dfac1d860a2844d877865eb", features = ["markdown", "doc_editor"] }
+cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "da044adbcbe32e2443e9626e15cf998b73c7c833", features = ["markdown", "doc_editor"] }
 cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "dc0aa0eb70691e26c1afcc70e87eb4b63e2fb7b6" }
 # The agenda's JSON and its lines (the daemon's `agenda` answer); the
 # library only, no I/O.
