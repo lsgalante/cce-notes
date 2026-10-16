@@ -43,7 +43,7 @@ use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{DisplayList, PaintCtx};
 use cce_ui::widget::{
     Adapted, Bounds, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta, NamedKey, ScrollMotion,
-    TextBox, WidgetHost,
+    TextBox, WidgetHost, WidgetId,
 };
 use cce_ui::widget::doc_editor::{self, DocEditor, EditorTheme, Pos};
 use cce_vault::markdown::{Block, SpanLink};
@@ -157,6 +157,20 @@ enum LeftTab {
     Search,
 }
 
+/// The panes a wheel scrolls, each its own to the scroll-gesture rule
+/// (`NotesApp::wheel_ids`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WheelPane {
+    Side,
+    Search,
+    Tree,
+    Note,
+}
+
+impl WheelPane {
+    const ALL: [WheelPane; 4] = [WheelPane::Side, WheelPane::Search, WheelPane::Tree, WheelPane::Note];
+}
+
 /// The right pane's tabs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SideTab {
@@ -207,6 +221,9 @@ struct NotesApp {
     tree_scroll: f32,
     tree_motion: ScrollMotion,
     tree_hover: Option<usize>,
+    /// Who each [`WheelPane`] is to the scroll-gesture rule: the pane a
+    /// gesture first moves keeps it, and the others stay put under it.
+    wheel_ids: [WidgetId; 4],
 
     /// The open note's vault path.
     current: Option<String>,
@@ -338,6 +355,7 @@ impl NotesApp {
             tree_scroll: 0.0,
             tree_motion: ScrollMotion::new(),
             tree_hover: None,
+            wheel_ids: std::array::from_fn(|_| cce_ui::widget::Widget::new().id()),
             current: None,
             saved: String::new(),
             blocks: Vec::new(),
@@ -386,6 +404,22 @@ impl NotesApp {
         };
         app.rebuild_rows();
         app
+    }
+
+    /// The pane a wheel at `(x, y)` scrolls, when no pane owns the gesture.
+    fn wheel_pane_at(&self, m: &Metrics, x: f32, y: f32) -> Option<WheelPane> {
+        if m.side_body.contains(x, y) {
+            Some(WheelPane::Side)
+        } else if m.tree_body.contains(x, y) {
+            Some(match self.left_tab {
+                LeftTab::Search => WheelPane::Search,
+                LeftTab::Files => WheelPane::Tree,
+            })
+        } else if m.note.contains(x, y) {
+            Some(WheelPane::Note)
+        } else {
+            None
+        }
     }
 
     fn metrics(&self) -> Metrics {
@@ -2400,45 +2434,45 @@ impl Application for NotesApp {
             return;
         }
         let m = self.metrics();
-        if m.side_body.contains(x, y) {
-            if self.side_panel.wheel(delta, m.side_body) {
-                *needs_rebuild = true;
-            }
+        // A gesture is the pane's it first moved, wherever the pointer goes
+        // after; a pane it is not stays put under it, so a scroll never
+        // changes panes as the pointer crosses into the next.
+        self.ui_context.note_scroll_event();
+        let owner = WheelPane::ALL.into_iter().find(|&p| self.ui_context.owns_scroll_gesture(self.wheel_ids[p as usize]));
+        let Some(pane) = owner.or_else(|| self.wheel_pane_at(&m, x, y)) else { return };
+        let id = self.wheel_ids[pane as usize];
+        if !self.ui_context.may_take_wheel(id) {
             return;
         }
-        if self.left_tab == LeftTab::Search && m.tree_body.contains(x, y) {
-            if self.search_panel.wheel(delta, m.tree_body) {
-                *needs_rebuild = true;
-            }
-            return;
-        }
-        if m.tree_body.contains(x, y) && self.left_tab == LeftTab::Files {
-            let max = self.tree_max_scroll(&m);
-            self.tree_motion.reconcile(0.0, self.tree_scroll);
-            if self.tree_motion.apply(delta, (TREE_ROW_H, TREE_ROW_H), Bounds::max(0.0), Bounds::max(max)) {
-                self.tree_scroll = self.tree_motion.y.pos();
-                *needs_rebuild = true;
-            }
-            return;
-        }
-        if !m.note.contains(x, y) {
-            return;
-        }
-        match self.mode {
-            Mode::Reading => {
-                let max = self.read_max_scroll(&m);
-                self.read_motion.reconcile(0.0, self.read_scroll);
-                let line = READ_SIZE * 1.5;
-                if self.read_motion.apply(delta, (line, line * 2.0), Bounds::max(0.0), Bounds::max(max)) {
-                    self.read_scroll = self.read_motion.y.pos();
-                    *needs_rebuild = true;
+        let moved = match pane {
+            WheelPane::Side => self.side_panel.wheel(delta, m.side_body),
+            WheelPane::Search => self.search_panel.wheel(delta, m.tree_body),
+            WheelPane::Tree => {
+                let max = self.tree_max_scroll(&m);
+                self.tree_motion.reconcile(0.0, self.tree_scroll);
+                let moved = self.tree_motion.apply(delta, (TREE_ROW_H, TREE_ROW_H), Bounds::max(0.0), Bounds::max(max));
+                if moved {
+                    self.tree_scroll = self.tree_motion.y.pos();
                 }
+                moved
             }
-            Mode::Source => {
-                if self.editor.wheel(delta) {
-                    *needs_rebuild = true;
+            WheelPane::Note => match self.mode {
+                Mode::Reading => {
+                    let max = self.read_max_scroll(&m);
+                    self.read_motion.reconcile(0.0, self.read_scroll);
+                    let line = READ_SIZE * 1.5;
+                    let moved = self.read_motion.apply(delta, (line, line * 2.0), Bounds::max(0.0), Bounds::max(max));
+                    if moved {
+                        self.read_scroll = self.read_motion.y.pos();
+                    }
+                    moved
                 }
-            }
+                Mode::Source => self.editor.wheel(delta),
+            },
+        };
+        if moved {
+            self.ui_context.claim_scroll_gesture(id);
+            *needs_rebuild = true;
         }
     }
 
@@ -2708,6 +2742,39 @@ mod tests {
 
     fn disk(dir: &Path, path: &str) -> String {
         std::fs::read_to_string(dir.join(path)).unwrap()
+    }
+
+    #[test]
+    fn a_scroll_stays_with_the_pane_it_first_moved() {
+        use cce_ui::widget::scroll_motion::{force_scroll_settings, ScrollSettings};
+        force_scroll_settings(Some(ScrollSettings { smooth: false, kinetic: false, ..Default::default() }));
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(8));
+        let files: Vec<(String, &str)> = (0..80).map(|i| (format!("n{i:02}.md"), "text\n")).collect();
+        let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), *t)).collect();
+        let (_d, mut app) = app_over(&files);
+        app.open_path("n00.md", None, true);
+        let m = app.metrics();
+        let tree = (m.tree_body.x + m.tree_body.width / 2.0, m.tree_body.y + 40.0);
+        let note = (m.note.x + m.note.width / 2.0, m.note.y + 40.0);
+        let notch = MouseScrollDelta::LineDelta(0.0, -1.0);
+        let wheel = |app: &mut NotesApp, (x, y): (f32, f32)| {
+            let mut rebuild = false;
+            app.handle_mouse_wheel(&notch, LogicalPosition { x, y }, &mut rebuild);
+            pause();
+        };
+
+        wheel(&mut app, tree);
+        let scrolled = app.tree_scroll;
+        assert!(scrolled > 0.0, "the tree scrolls");
+        // The pointer crosses into the note: the gesture is still the tree's.
+        wheel(&mut app, note);
+        assert!(app.tree_scroll > scrolled, "the tree keeps the gesture");
+        // A new gesture over the note is the note's.
+        app.ui_context.last_scroll_time = None;
+        let held = app.tree_scroll;
+        wheel(&mut app, note);
+        assert_eq!(app.tree_scroll, held);
+        force_scroll_settings(None);
     }
 
     #[test]
